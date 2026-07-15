@@ -1,0 +1,80 @@
+{
+  "policy_version": "2026-07-15.v2",
+  "model_version": "gpt-5.6",
+  "max_record_age_days": 90,
+  "rules": [
+    {
+      "id": "high-risk-deep-work",
+      "match": {
+        "failcost": ["high"],
+        "depth": ["deep"]
+      },
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "escalation": "Clarify unresolved authority or domain decisions before execution; use Max only after a focused High run fails a named check."
+    },
+    {
+      "id": "high-risk-ambiguous-work",
+      "match": {
+        "failcost": ["high"],
+        "verifiable": ["partial", "no"]
+      },
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "escalation": "Stop on unresolved high-impact assumptions; do not substitute more effort for missing authority or evidence."
+    },
+    {
+      "id": "verifiable-high-volume",
+      "match": {
+        "verifiable": ["yes"],
+        "volume": ["high"]
+      },
+      "model": "gpt-5.6-luna",
+      "effort": "medium",
+      "escalation": "Retry validator failures with Terra + Medium; use Sol + High only for isolated deep-judgment exceptions."
+    },
+    {
+      "id": "clear-repeatable-work",
+      "match": {
+        "verifiable": ["yes"],
+        "depth": ["shallow"]
+      },
+      "model": "gpt-5.6-luna",
+      "effort": "medium",
+      "escalation": "Raise effort one step only after a named deterministic check fails."
+    },
+    {
+      "id": "judgment-and-analysis",
+      "match": {
+        "verifiable": ["partial", "no"],
+        "depth": ["medium"]
+      },
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+      "escalation": "Move to Sol + High when the failure shows a knowledge or judgment ceiling, not merely verbosity or formatting drift."
+    },
+    {
+      "id": "complex-build",
+      "match": {
+        "failcost": ["mid"],
+        "depth": ["deep"]
+      },
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+      "escalation": "Move to Sol + High if architecture, domain knowledge, or repeated verification failures exceed Terra's ceiling."
+    }
+  ],
+  "fallback": {
+    "id": "balanced-default",
+    "model": "gpt-5.6-terra",
+    "effort": "medium",
+    "escalation": "Name the failed check, then raise effort or tier one step according to the failure type."
+  },
+  "ultra": {
+    "minimum_workstreams": 3,
+    "required_decomposable": "yes",
+    "required_depth": "deep",
+    "required_failcost": "high",
+    "note": "Ultra is eligible only for explicit parallel decomposition; it is never selected automatically."
+  }
+}

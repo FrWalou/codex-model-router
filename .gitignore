@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Local routing evidence may contain environment-specific command summaries.
+outcomes.jsonl
+.codex/state/

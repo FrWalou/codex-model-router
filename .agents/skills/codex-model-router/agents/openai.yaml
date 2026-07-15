@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Model Router"
+  short_description: "단계별 GPT-5.6 worker를 자동 배정합니다"
+  default_prompt: "Use $codex-model-router to route this task across suitable GPT-5.6 workers and verify each phase."
