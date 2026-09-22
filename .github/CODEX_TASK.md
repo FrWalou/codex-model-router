@@ -1,32 +1,123 @@
-# R0.01 — Astra-aware routing
+# R0.02 — Deterministic task classification
 
-Status: CORRECTION REQUIRED
+Status: IN PROGRESS
 
-## Review finding
+## Objective
 
-The implementation commit `45ecfb4b24f79575876e7873b9f8e93a173c8784` adds three Astra agent TOML files, increasing the project-agent count from 5 to 8.
+Add a local, zero-LLM classifier that can read a structured Codex task card and derive the routing axes required by the existing advisor.
 
-The existing GitHub Actions contract in `.github/workflows/ci.yml` still contains:
+This brick automates classification of ONE bounded task/phase. It does not yet decompose a multi-phase prompt, invoke Graphify, launch workers, or measure quota.
 
-```python
-assert len(files) == 5, files
-```
-
-Therefore the `validate-agents` CI job will fail on a pull request or on `main`, even though the focused unit tests pass.
-
-This mismatch was not in the original R0.01 allowed paths. Fix only this integration contract.
+The classifier must be deterministic, explainable, conservative, and safe to run before Codex spends model quota.
 
 ## Allowed paths
 
-- .github/workflows/ci.yml
+- .agents/skills/codex-model-router/scripts/**
+- .agents/skills/codex-model-router/tests/**
+- .agents/skills/codex-model-router/SKILL.md
+- .agents/skills/codex-model-router/README.md
+- README.md
+- CHANGELOG.md
 
-Do not modify routing code, policy, agents, tests, docs, or any other file.
+Do not modify policy.json or any existing agent TOML in this brick.
 
-## Required change
+## Required behavior
 
-Update the CI custom-agent validation so it accepts the current expected package shape with 8 `pas_*.toml` agent definitions.
+### New classifier
 
-Keep the check strict: do not remove the count assertion and do not weaken TOML parsing.
+Add a deterministic classifier that accepts either:
+- a task-card file path; or
+- explicit task text via a testable function boundary.
+
+It must derive the existing routing axes:
+- task_family
+- verifiable: yes | partial | no
+- failcost: low | mid | high
+- volume: low | mid | high
+- depth: shallow | medium | deep
+- decomposable: yes | no
+- workstreams: integer >= 1
+
+Also return:
+- confidence: low | medium | high
+- reasons: compact non-sensitive signal labels, not copied task prose
+
+### Signals
+
+Use explicit, reviewable rules. At minimum consider:
+
+- validation/tests/check commands -> stronger verifiability
+- docs/config-only scope -> lower depth/failcost unless contradicted
+- auth/credentials/tenant/privacy/security/deletion/migration/remediation/external-write signals -> failcost floor
+- concurrency/race/distributed/cross-package/architecture signals -> depth floor
+- number and spread of allowed mutable paths -> depth/volume signals
+- multiple independent named workstreams -> decomposability/workstream count
+- missing/ambiguous acceptance or validation -> lower confidence / weaker verifiability
+
+Do not infer secrets, customer data, or business-specific semantics from arbitrary prose.
+
+### Safety floors
+
+The classifier must be conservative:
+- security/auth/credential/tenant-isolation/remediation/destructive migration => failcost=high
+- concurrency/race/distributed invariants => depth at least medium
+- architecture/cross-cutting changes => depth=deep when scope supports it
+- no deterministic validation => verifiable cannot be yes
+- low confidence must never cause a cheaper route than a conservative fallback
+
+Do not automatically choose a model inside the classifier. It produces axes only; the existing advisor remains the routing authority.
+
+### CLI integration
+
+Expose a CLI path that can classify a task card and emit machine-readable JSON.
+
+Preferred shape:
+
+```bash
+python3 .agents/skills/codex-model-router/scripts/advisor.py classify --task-file .github/CODEX_TASK.md
+```
+
+or an equally small compatible interface.
+
+Do not add an external dependency.
+
+### Advisor handoff
+
+Provide a deterministic way to feed the classification result into the existing recommendation/dispatch flow without manually retyping all axes.
+
+This may be:
+- a new advisor subcommand; or
+- a shared function used by classify + dispatch-from-task.
+
+Keep current explicit-axis CLI behavior backwards compatible.
+
+### Tests
+
+Add focused tests covering at least:
+
+- docs-only task -> low/shallow/verifiable when validation exists
+- ordinary bounded implementation -> mid/medium
+- auth/tenant/security task -> high failcost
+- concurrency/race task -> medium-or-deep depth floor
+- destructive migration/remediation/external-write task -> high failcost
+- no validation -> not fully verifiable
+- allowed-path spread affects depth conservatively
+- low-confidence classification cannot under-route below conservative fallback
+- deterministic identical input -> identical JSON-equivalent output
+- reasons contain signal labels and do not echo sensitive/raw task prose
+- malformed/missing task file fails safely
+- existing explicit-axis advisor CLI/tests remain passing
+
+## Non-goals
+
+Do NOT:
+- decompose one prompt into plan/build/test/qa phases yet
+- integrate Graphify yet
+- call Luna/Qwen/Jev/any model
+- launch Codex workers automatically
+- change Astra escalation policy
+- add quota accounting yet
+- inspect arbitrary repository files beyond the explicitly supplied task card
 
 ## Validation
 
@@ -35,31 +126,27 @@ Run:
 ```bash
 python3 -m unittest discover -s .agents/skills/codex-model-router/tests -v
 python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
-python3 - <<'PY'
-from pathlib import Path
-import tomllib
-
-files = sorted(Path(".codex/agents").glob("pas_*.toml"))
-assert len(files) == 8, files
-for path in files:
-    tomllib.loads(path.read_text(encoding="utf-8"))
-print(f"validated {len(files)} agent definitions")
-PY
 git diff --check
 ```
+
+If a new Python script is added under scripts/, compile it too.
+
+Demonstrate classification on the current task card and include the resulting axes in the completion report.
 
 ## Commit
 
 Commit exactly:
 
 ```
-fix: align CI with Astra agents
+feat: classify task cards for routing
 ```
 
 Push normally to `dev`. Never force-push.
 
 Then STOP and report:
-- file changed
-- validations and results
+- files changed
+- classification rules added
+- current task-card classification result
+- tests/checks run
 - commit SHA
 - push result
