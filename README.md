@@ -122,6 +122,17 @@ python3 .agents/skills/codex-model-router/scripts/advisor.py dispatch \
   --approval-boundary-confirmed
 ```
 
+For a structured task card, classify locally before recommending or dispatching. Classification reads only the supplied file, returns signal labels rather than task prose, and uses conservative floors when confidence is low:
+
+```bash
+python3 .agents/skills/codex-model-router/scripts/advisor.py classify \
+  --task-file .github/CODEX_TASK.md
+python3 .agents/skills/codex-model-router/scripts/advisor.py dispatch-from-task \
+  --task-file .github/CODEX_TASK.md --phase build --task-scope phase
+```
+
+`classify` does not choose a model or launch a worker. It derives the existing axes from validation evidence, sensitive-change and concurrency signals, allowed-path spread, and explicitly independent workstreams. The normal advisor remains the routing authority; existing explicit-axis `recommend` and `dispatch` commands remain supported.
+
 The JSON result includes the model, effort, policy rule, custom-agent name, whether delegation is required, supported dispatch modes, and `codex_exec_ready`. The executable fallback command is withheld unless the parent sandbox and approval policy are explicit, the child sandbox is the same or stricter, and the coordinator confirms the boundary. It passes the exact parent approval policy to the child command instead of relying on user defaults.
 
 ## How automatic routing works

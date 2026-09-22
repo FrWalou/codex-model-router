@@ -790,6 +790,364 @@ class AdvisorRegistryTests(unittest.TestCase):
 
 
 class AdvisorCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.advisor = load_advisor()
+
+    def test_classifier_docs_only_is_low_shallow_and_verifiable_with_validation(self):
+        result = self.advisor.classify_task_text("""# Update docs
+## Required behavior
+- docs/guide.md
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["task_family"], "documentation-or-config-change")
+        self.assertEqual(result["failcost"], "low")
+        self.assertEqual(result["depth"], "shallow")
+        self.assertEqual(result["verifiable"], "yes")
+
+    def test_classifier_ordinary_bounded_implementation_is_mid_medium(self):
+        result = self.advisor.classify_task_text("""# Add feature
+## Required behavior
+- src/widget.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "mid")
+        self.assertEqual(result["depth"], "medium")
+
+    def test_classifier_sensitive_and_destructive_signals_have_high_failcost(self):
+        for signal in ("tenant isolation", "auth credential", "destructive migration", "external write remediation"):
+            with self.subTest(signal=signal):
+                result = self.advisor.classify_task_text(f"""# Change
+## Required behavior
+{signal}
+- src/change.py
+## Validation
+python3 -m unittest
+""")
+                self.assertEqual(result["failcost"], "high")
+
+    def test_classifier_concurrency_has_medium_depth_floor(self):
+        result = self.advisor.classify_task_text("""# Docs
+## Required behavior
+race invariant
+- docs/guide.md
+## Validation
+python3 -m unittest
+""")
+        self.assertIn(result["depth"], {"medium", "deep"})
+
+    def test_classifier_without_validation_is_not_fully_verifiable(self):
+        result = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+""")
+        self.assertNotEqual(result["verifiable"], "yes")
+
+    def test_classifier_recognizes_bulleted_validation_commands(self):
+        result = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Validation
+- python3 scripts/check.py
+""")
+        self.assertEqual(result["verifiable"], "yes")
+        self.assertIn("deterministic-validation", result["reasons"])
+
+    def test_classifier_ignores_validation_tool_names_outside_validation_sections(self):
+        result = self.advisor.classify_task_text("""# Docs
+## Required behavior
+- docs/guide.md
+## Non-goals
+Do not run pytest for this task.
+""")
+        self.assertNotEqual(result["verifiable"], "yes")
+        self.assertIn("validation-missing", result["reasons"])
+
+    def test_classifier_rejects_negated_validation_prose(self):
+        result = self.advisor.classify_task_text("""# Docs
+## Required behavior
+- docs/guide.md
+## Validation
+pytest is unavailable; use manual review only.
+""")
+        self.assertNotEqual(result["verifiable"], "yes")
+        self.assertIn("validation-missing", result["reasons"])
+
+        future_negation = self.advisor.classify_task_text("""# Docs
+## Required behavior
+- docs/guide.md
+## Validation
+pytest will not be run.
+""")
+        self.assertNotEqual(future_negation["verifiable"], "yes")
+
+    def test_classifier_prefers_executable_validation_over_tests_rubric(self):
+        result = self.advisor.classify_task_text("""# Change
+### Tests
+- describe classifier behavior
+## Validation
+python3 -m unittest
+## Required behavior
+- src/change.py
+""")
+        self.assertEqual(result["verifiable"], "yes")
+
+        empty_validation = self.advisor.classify_task_text("""# Change
+### Tests
+pytest
+## Validation
+## Required behavior
+- src/change.py
+""")
+        self.assertNotEqual(empty_validation["verifiable"], "yes")
+
+    def test_classifier_rejects_nonchecking_commands_as_validation(self):
+        for command in (
+            "python3 --version",
+            "python3 -m http.server",
+            "pytest --version",
+            "npm run start",
+            "npm run test-server",
+            "git status",
+        ):
+            with self.subTest(command=command):
+                result = self.advisor.classify_task_text(f"""# Change
+## Required behavior
+- src/change.py
+## Validation
+{command}
+""")
+                self.assertNotEqual(result["verifiable"], "yes")
+
+    def test_classifier_handles_markdown_and_per_line_validation_evidence(self):
+        for validation in (
+            "- `python3 -m unittest`",
+            "### Commands\npython3 -m unittest",
+            "pytest is unavailable.\npython3 -m unittest discover",
+            "python3 -m unittest\nThen perform manual review.",
+        ):
+            with self.subTest(validation=validation):
+                result = self.advisor.classify_task_text(f"""# Change
+## Required behavior
+- src/change.py
+## Validation
+{validation}
+""")
+                self.assertEqual(result["verifiable"], "yes")
+
+    def test_classifier_mutable_path_spread_is_conservative(self):
+        result = self.advisor.classify_task_text("""# Docs
+## Required behavior
+- docs/a.md
+- config/a.toml
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["depth"], "medium")
+        self.assertIn("mutable-path-spread", result["reasons"])
+
+    def test_classifier_prefers_explicit_allowed_paths_over_other_path_references(self):
+        result = self.advisor.classify_task_text("""# Docs
+## Allowed paths
+- docs/guide.md
+## Notes
+- src/example.py
+## Required behavior
+Update the guide.
+## Validation
+python3 scripts/check.py
+""")
+        self.assertEqual(result["task_family"], "documentation-or-config-change")
+        self.assertEqual(result["depth"], "shallow")
+
+    def test_classifier_requires_named_independent_workstreams_for_decomposition(self):
+        requirement_only = self.advisor.classify_task_text("""# Change
+## Required behavior
+multiple independent named workstreams must be considered
+- src/change.py
+## Validation
+python3 -m unittest
+""")
+        named = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (independently verifiable)
+- update implementation
+- add tests
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(requirement_only["decomposable"], "no")
+        self.assertEqual(requirement_only["workstreams"], 1)
+        self.assertEqual(named["decomposable"], "yes")
+        self.assertEqual(named["workstreams"], 2)
+
+    def test_classifier_rejects_negated_independent_workstreams(self):
+        result = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams not independent
+- implementation
+- tests
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["decomposable"], "no")
+        self.assertEqual(result["workstreams"], 1)
+
+        cannot_verify = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (cannot be independently verified)
+- implementation
+- tests
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(cannot_verify["decomposable"], "no")
+        self.assertEqual(cannot_verify["workstreams"], 1)
+
+        subjective = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (independently verifiable)
+Each stream requires subjective review only and has no deterministic checks.
+- implementation
+- tests
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(subjective["decomposable"], "no")
+        self.assertEqual(subjective["workstreams"], 1)
+
+        manual = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (independently verifiable)
+Each stream is checked manually; no automated checks exist.
+- implementation
+- tests
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(manual["decomposable"], "no")
+        self.assertEqual(manual["workstreams"], 1)
+
+        dependent = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (independently verifiable)
+Independent checks are impossible; both streams depend on each other.
+- implementation
+- tests
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(dependent["decomposable"], "no")
+        self.assertEqual(dependent["workstreams"], 1)
+
+    def test_classifier_counts_only_top_level_named_workstreams(self):
+        nested = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (independently verifiable)
+- implementation
+  - update helper
+  - update caller
+## Validation
+python3 -m unittest
+""")
+        formatted = self.advisor.classify_task_text("""# Change
+## Required behavior
+- src/change.py
+## Workstreams (independently verifiable)
+- `implementation`: update code
+- `tests`: add coverage
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(nested["decomposable"], "no")
+        self.assertEqual(nested["workstreams"], 1)
+        self.assertEqual(formatted["decomposable"], "yes")
+        self.assertEqual(formatted["workstreams"], 2)
+
+    def test_classifier_low_confidence_cannot_under_route(self):
+        result = self.advisor.classify_task_text("update docs")
+        self.assertEqual(result["confidence"], "low")
+        self.assertIn(result["failcost"], {"mid", "high"})
+        self.assertIn(result["depth"], {"medium", "deep"})
+        self.assertNotEqual(result["verifiable"], "yes")
+
+    def test_classifier_is_deterministic_and_reasons_do_not_echo_task_prose(self):
+        task = """# Change
+## Required behavior
+security token SUPERSECRET-123
+- src/change.py
+## Validation
+python3 -m unittest
+"""
+        first = self.advisor.classify_task_text(task)
+        self.assertEqual(first, self.advisor.classify_task_text(task))
+        self.assertNotIn("supersecret", " ".join(first["reasons"]).lower())
+        self.assertIn("sensitive-change-floor", first["reasons"])
+
+    def test_classifier_file_errors_safely(self):
+        with self.assertRaisesRegex(ValueError, "existing regular file"):
+            self.advisor.classify_task_file(Path("missing-task-card.md"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            malformed = Path(temp_dir) / "task.txt"
+            malformed.write_text("not a structured task card", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "structured heading"):
+                self.advisor.classify_task_file(malformed)
+
+    def test_classify_and_recommend_from_task_commands_emit_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_file = Path(temp_dir) / "task.md"
+            task_file.write_text("""# Change
+## Required behavior
+- src/change.py
+## Validation
+python3 -m unittest
+""", encoding="utf-8")
+            classify = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "classify", "--task-file", str(task_file)],
+                text=True, capture_output=True, check=False,
+            )
+            recommend = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "recommend-from-task", "--task-file", str(task_file)],
+                text=True, capture_output=True, check=False,
+            )
+        self.assertEqual(classify.returncode, 0, classify.stderr)
+        self.assertEqual(recommend.returncode, 0, recommend.stderr)
+        self.assertEqual(json.loads(recommend.stdout)["axes"], {
+            key: json.loads(classify.stdout)[key]
+            for key in ("verifiable", "failcost", "volume", "depth", "decomposable", "workstreams")
+        })
+
+    def test_dispatch_from_task_emits_dispatch_contract_without_launching_a_worker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_file = Path(temp_dir) / "task.md"
+            task_file.write_text("""# Change
+## Required behavior
+- src/change.py
+## Validation
+python3 -m unittest
+""", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable, str(MODULE_PATH), "dispatch-from-task",
+                    "--task-file", str(task_file), "--phase", "build", "--task-scope", "phase",
+                ],
+                text=True, capture_output=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIn("classification", payload)
+        self.assertTrue(payload["dispatch_required"])
+        self.assertIsNone(payload["dispatch_mode"])
+
     def test_recommend_command_emits_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             registry = Path(temp_dir) / "outcomes.jsonl"

@@ -20,7 +20,7 @@ Assign a non-sensitive hyphen-case `task_family`, a `phase` (`plan`, `build`, `t
 - `decomposable`: `yes` only for independently verifiable workstreams
 - `workstreams`: independent workstream count
 
-Run `scripts/advisor.py dispatch --help`, then call `dispatch` with those values and `task_scope` (`micro`, `phase`, `workflow`).
+For a supplied structured task card, first run `scripts/advisor.py classify --task-file PATH`. The local classifier returns conservative axes, confidence, and non-sensitive signal labels without calling a model. Use `recommend-from-task` or `dispatch-from-task` to pass those axes to the advisor without retyping them. Otherwise run `scripts/advisor.py dispatch --help`, then call `dispatch` with explicit axes and `task_scope` (`micro`, `phase`, `workflow`).
 
 ## Execute the dispatch
 

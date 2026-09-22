@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added deterministic local task-card classification with conservative routing-axis handoff.
 - Added GPT-6 Astra as the final evidence-gated escalation tier with bounded Low, Medium, and High workers.
 - Kept Astra xhigh/max manual-only and preserved Luna/Terra/Sol static routing.
 

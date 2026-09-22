@@ -115,6 +115,286 @@ def load_policy(path: Path = DEFAULT_POLICY) -> dict[str, Any]:
     return data
 
 
+def _contains_any(text: str, signals: tuple[str, ...]) -> bool:
+    return any(re.search(r"\b" + re.escape(signal) + r"\b", text) for signal in signals)
+
+
+def _has_validation_evidence(task_text: str) -> bool:
+    """Prefer an executable-looking validation section over prose mentions."""
+    sections: dict[str, list[str]] = {"validation": [], "test": [], "check": []}
+    seen_sections: set[str] = set()
+    current: str | None = None
+    section_level: int | None = None
+    for line in task_text.splitlines():
+        heading = re.match(
+            r"^(#{1,6})\s+(validation|tests?|checks?)\b", line, flags=re.IGNORECASE
+        )
+        if heading:
+            name = heading.group(2).lower()
+            current = (
+                "validation"
+                if name == "validation"
+                else "test"
+                if name.startswith("test")
+                else "check"
+            )
+            section_level = len(heading.group(1))
+            seen_sections.add(current)
+            continue
+        other_heading = re.match(r"^(#{1,6})\s+", line)
+        if other_heading and current and len(other_heading.group(1)) <= (section_level or 6):
+            current = None
+            section_level = None
+        elif current and not other_heading:
+            sections[current].append(line)
+    section_lines = (
+        sections["validation"]
+        if "validation" in seen_sections
+        else sections["test"]
+        if "test" in seen_sections
+        else sections["check"]
+    )
+    command_patterns = (
+        re.compile(
+            r"^python\d*\s+(?:-m\s+(?:unittest|pytest|compileall|py_compile|doctest|mypy|ruff)"
+            r"(?:\s|$)|\S+\.py(?:\s|$))"
+        ),
+        re.compile(r"^pytest(?:\s|$)"),
+        re.compile(
+            r"^npm\s+(?:test|run\s+(?:test|lint|typecheck|check|build|validate)|"
+            r"exec\s+(?:pytest|eslint|tsc))(?:\s|$)"
+        ),
+        re.compile(r"^go\s+(?:test|vet|build)\b"),
+        re.compile(r"^cargo\s+(?:test|check|clippy|build)\b"),
+        re.compile(r"^make(?:\s|$)"),
+        re.compile(r"^git\s+diff\b.*--check\b"),
+        re.compile(r"^(?:bash|sh)\s+\S+"),
+        re.compile(r"^\./\S+"),
+    )
+    for line in section_lines:
+        candidate = re.sub(r"^\s*(?:[-*]\s+)?(?:\$\s+)?", "", line.lower())
+        candidate = candidate.strip()
+        if candidate.startswith("`") and candidate.endswith("`"):
+            candidate = candidate[1:-1].strip()
+        if _contains_any(
+            candidate,
+            (
+                "manual review",
+                "unavailable",
+                "not available",
+                "not installed",
+                "do not run",
+                "no deterministic validation",
+                "without validation",
+                "will not be run",
+                "would not be run",
+                "won't be run",
+            ),
+        ) or re.search(
+            r"\b(?:will|would|should|must|may|can|could)\s+not\b", candidate
+        ):
+            continue
+        if re.match(r"^pytest\s+(?:--version|--help)(?:\s|$)", candidate):
+            continue
+        if any(pattern.match(candidate) for pattern in command_patterns):
+            return True
+    return False
+
+
+def _task_card_paths(task_text: str) -> list[str]:
+    """Return path bullets, preferring an explicit allowed/mutable-path section."""
+    lines = task_text.splitlines()
+    scoped_lines: list[str] = []
+    in_scope = False
+    found_scope = False
+    for line in lines:
+        if re.match(
+            r"^#{1,6}\s+(allowed|mutable)\s+paths?\b", line, flags=re.IGNORECASE
+        ):
+            in_scope = True
+            found_scope = True
+            continue
+        if in_scope and re.match(r"^#{1,6}\s+", line):
+            break
+        if in_scope:
+            scoped_lines.append(line)
+
+    paths = []
+    for line in scoped_lines if found_scope else lines:
+        match = re.match(r"^\s*-\s+`?([^`\s]+)`?\s*$", line)
+        if match and ("/" in match.group(1) or "." in match.group(1)):
+            paths.append(match.group(1))
+    return paths
+
+
+def _named_independent_workstreams(task_text: str) -> int:
+    """Count named entries only in an explicitly independent Workstreams section."""
+    lines = task_text.splitlines()
+    in_workstreams = False
+    section: list[str] = []
+    for line in lines:
+        if re.match(r"^#{1,6}\s+.*\bworkstreams?\b", line, flags=re.IGNORECASE):
+            in_workstreams = True
+            section.append(line)
+            continue
+        if in_workstreams and re.match(r"^#{1,6}\s+", line):
+            break
+        if in_workstreams:
+            section.append(line)
+    section_text = "\n".join(section).lower()
+    negated_independence = re.search(
+        r"\b(?:no|not|cannot|can't|isn't|aren't|without)\b[^\n]{0,40}"
+        r"\b(?:independent|independently|parallel)\b|\bnon[- ]independent\b",
+        section_text,
+    )
+    if not section or negated_independence or _contains_any(section_text, ("sequential",)):
+        return 1
+    independently_verifiable = _contains_any(
+        section_text,
+        (
+            "independently verifiable",
+            "independent and verifiable",
+            "parallel and verifiable",
+        ),
+    )
+    if not independently_verifiable or _contains_any(
+        section_text,
+        (
+            "subjective review",
+            "manual review",
+            "manually",
+            "no deterministic checks",
+            "no automated checks",
+            "no automated validation",
+            "not verifiable",
+            "independent checks are impossible",
+            "depend on each other",
+        ),
+    ):
+        return 1
+    entries = [
+        line for line in section[1:]
+        if re.match(r"^(?:-|\d+[.)])\s+\S.+", line)
+    ]
+    return len(entries) if len(entries) >= 2 else 1
+
+
+def classify_task_text(task_text: str) -> dict[str, Any]:
+    """Classify one task card with local, reviewable signals only.
+
+    The returned reasons are stable signal labels; task prose is intentionally
+    never copied into the result.
+    """
+    if not isinstance(task_text, str) or not task_text.strip():
+        raise ValueError("task text must be a non-empty string")
+    text = task_text.lower()
+    reasons: list[str] = []
+    paths = _task_card_paths(task_text)
+    path_roots = {path.split("/", 1)[0] for path in paths}
+
+    validation = _has_validation_evidence(task_text)
+    acceptance = _contains_any(text, ("required behavior", "acceptance criteria", "acceptance", "must"))
+    sensitive = _contains_any(
+        text,
+        (
+            "security", "auth", "authentication", "credential", "credentials", "tenant",
+            "privacy", "deletion", "destructive migration", "migration", "remediation", "external-write",
+            "external write",
+        ),
+    )
+    concurrent = _contains_any(text, ("concurrency", "concurrent", "race", "distributed", "invariant"))
+    architectural = _contains_any(text, ("architecture", "architectural", "cross-cutting", "cross package", "cross-package"))
+    docs_or_config = bool(paths) and all(
+        path.endswith((".md", ".rst", ".txt", ".toml", ".yaml", ".yml", ".json", ".ini"))
+        for path in paths
+    )
+
+    if sensitive:
+        task_family = "security-sensitive-change" if _contains_any(text, ("security", "auth", "credential", "tenant", "privacy")) else "migration-or-remediation"
+        failcost = "high"
+        reasons.append("sensitive-change-floor")
+    elif docs_or_config:
+        task_family = "documentation-or-config-change"
+        failcost = "low"
+        reasons.append("docs-config-only-scope")
+    elif concurrent:
+        task_family = "concurrency-change"
+        failcost = "mid"
+        reasons.append("concurrency-depth-floor")
+    else:
+        task_family = "bounded-implementation"
+        failcost = "mid"
+
+    depth = "shallow" if docs_or_config else "medium"
+    volume = "low" if docs_or_config else "mid"
+    if concurrent and depth == "shallow":
+        depth = "medium"
+    if concurrent and depth == "medium":
+        reasons.append("concurrency-depth-floor") if "concurrency-depth-floor" not in reasons else None
+    if len(paths) >= 4 or len(path_roots) >= 2:
+        if depth == "shallow":
+            depth = "medium"
+        if volume == "low":
+            volume = "mid"
+        reasons.append("mutable-path-spread")
+    if architectural and (len(paths) >= 2 or len(path_roots) >= 2):
+        depth = "deep"
+        reasons.append("architecture-depth-floor")
+    elif len(paths) >= 8 or len(path_roots) >= 4:
+        volume = "high"
+        reasons.append("large-mutable-scope")
+
+    if validation:
+        verifiable = "yes" if acceptance else "partial"
+        reasons.append("deterministic-validation")
+    else:
+        verifiable = "partial" if acceptance else "no"
+        reasons.append("validation-missing")
+
+    workstreams = _named_independent_workstreams(task_text)
+    if workstreams >= 2:
+        reasons.append("independent-workstreams")
+    decomposable = "yes" if workstreams >= 2 else "no"
+
+    confidence = "high" if validation and acceptance and paths else "medium" if validation or acceptance else "low"
+    if not paths:
+        confidence = "low"
+        reasons.append("mutable-scope-missing")
+    if not acceptance:
+        reasons.append("acceptance-ambiguous")
+    if confidence == "low":
+        # Ambiguity must not create a cheaper recommendation downstream.
+        verifiable = "partial" if verifiable == "yes" else verifiable
+        failcost = "high" if failcost == "high" else "mid"
+        volume = "mid" if volume == "low" else volume
+        depth = "medium" if depth == "shallow" else depth
+        reasons.append("low-confidence-conservative-fallback")
+
+    return {
+        "task_family": task_family,
+        "verifiable": verifiable,
+        "failcost": failcost,
+        "volume": volume,
+        "depth": depth,
+        "decomposable": decomposable,
+        "workstreams": workstreams,
+        "confidence": confidence,
+        "reasons": sorted(set(reasons)),
+    }
+
+
+def classify_task_file(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError("task file must be an existing regular file")
+    try:
+        task_text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("task file must be UTF-8 text") from error
+    if not re.search(r"^#{1,6}\s+", task_text, flags=re.MULTILINE):
+        raise ValueError("task file must contain a structured heading")
+    return classify_task_text(task_text)
+
+
 def _matches(rule_match: Mapping[str, list[Any]], axes: Mapping[str, Any]) -> bool:
     return all(axes.get(key) in allowed for key, allowed in rule_match.items())
 
@@ -446,6 +726,21 @@ def _recommend_command(args: argparse.Namespace, *, phase: str | None = None) ->
     return apply_history(base, history)
 
 
+def _recommend_from_task_command(args: argparse.Namespace, *, phase: str | None = None) -> dict[str, Any]:
+    classification = classify_task_file(args.task_file)
+    axes = {key: classification[key] for key in (
+        "verifiable", "failcost", "volume", "depth", "decomposable", "workstreams",
+    )}
+    proxy = argparse.Namespace(
+        policy=args.policy,
+        registry=args.registry,
+        task_family=classification["task_family"],
+        **axes,
+    )
+    result = _recommend_command(proxy, phase=phase)
+    return {**result, "classification": classification}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
@@ -459,6 +754,23 @@ def _parser() -> argparse.ArgumentParser:
     recommend_parser.add_argument("--depth", choices=("shallow", "medium", "deep"), required=True)
     recommend_parser.add_argument("--decomposable", choices=("yes", "no"), default="no")
     recommend_parser.add_argument("--workstreams", type=int, default=1)
+
+    classify_parser = commands.add_parser("classify")
+    classify_parser.add_argument("--task-file", type=Path, required=True)
+
+    recommend_task_parser = commands.add_parser("recommend-from-task")
+    recommend_task_parser.add_argument("--task-file", type=Path, required=True)
+
+    dispatch_task_parser = commands.add_parser("dispatch-from-task")
+    dispatch_task_parser.add_argument("--task-file", type=Path, required=True)
+    dispatch_task_parser.add_argument("--phase", choices=("plan", "build", "test", "qa"), required=True)
+    dispatch_task_parser.add_argument("--task-scope", choices=("micro", "phase", "workflow"), required=True)
+    dispatch_task_parser.add_argument("--parent-sandbox", choices=tuple(SANDBOX_RANK))
+    dispatch_task_parser.add_argument("--exec-sandbox", choices=tuple(SANDBOX_RANK))
+    dispatch_task_parser.add_argument(
+        "--parent-approval-policy", choices=tuple(sorted(VALID_APPROVAL_POLICIES))
+    )
+    dispatch_task_parser.add_argument("--approval-boundary-confirmed", action="store_true")
 
     dispatch_parser = commands.add_parser("dispatch")
     dispatch_parser.add_argument("--task-family", required=True)
@@ -511,6 +823,25 @@ def main() -> int:
     args = _parser().parse_args()
     if args.command == "recommend":
         print(json.dumps(_recommend_command(args), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.command == "classify":
+        print(json.dumps(classify_task_file(args.task_file), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.command == "recommend-from-task":
+        print(json.dumps(_recommend_from_task_command(args), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.command == "dispatch-from-task":
+        recommendation = _recommend_from_task_command(args, phase=args.phase)
+        payload = build_dispatch(
+            recommendation,
+            phase=args.phase,
+            task_scope=args.task_scope,
+            parent_sandbox=args.parent_sandbox,
+            exec_sandbox=args.exec_sandbox,
+            parent_approval_policy=args.parent_approval_policy,
+            approval_boundary_confirmed=args.approval_boundary_confirmed,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "dispatch":
         recommendation = _recommend_command(args, phase=args.phase)
