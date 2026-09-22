@@ -1,105 +1,32 @@
-# R0.01 — Add Astra-aware routing in shadow mode
+# R0.01 — Astra-aware routing
 
-Status: IN PROGRESS
+Status: CORRECTION REQUIRED
 
-## Objective
+## Review finding
 
-Extend Codex Model Router so it can recommend GPT-6 Astra as the final escalation tier while preserving the existing deterministic routing model, safety boundaries, and evidence-gated escalation.
+The implementation commit `45ecfb4b24f79575876e7873b9f8e93a173c8784` adds three Astra agent TOML files, increasing the project-agent count from 5 to 8.
 
-This brick is routing-only. It must not introduce automatic task classification from CODEX_TASK.md or Graphify yet.
+The existing GitHub Actions contract in `.github/workflows/ci.yml` still contains:
+
+```python
+assert len(files) == 5, files
+```
+
+Therefore the `validate-agents` CI job will fail on a pull request or on `main`, even though the focused unit tests pass.
+
+This mismatch was not in the original R0.01 allowed paths. Fix only this integration contract.
 
 ## Allowed paths
 
-- .agents/skills/codex-model-router/references/policy.json
-- .agents/skills/codex-model-router/scripts/advisor.py
-- .agents/skills/codex-model-router/tests/**
-- .agents/skills/codex-model-router/SKILL.md
-- .agents/skills/codex-model-router/README.md
-- .codex/agents/pas_astra_*.toml
-- README.md
-- CHANGELOG.md
+- .github/workflows/ci.yml
 
-Do not modify unrelated files.
+Do not modify routing code, policy, agents, tests, docs, or any other file.
 
-## Required behavior
+## Required change
 
-### Model support
+Update the CI custom-agent validation so it accepts the current expected package shape with 8 `pas_*.toml` agent definitions.
 
-Add `gpt-6-astra` as a supported model.
-
-Support Astra efforts:
-- low
-- medium
-- high
-- xhigh
-- max
-
-Do not make xhigh or max automatically selectable by static policy or history.
-
-### Escalation policy
-
-Preserve the existing low-cost path:
-- Luna
-- Terra
-- Sol
-
-Add Astra only after Sol for genuinely difficult or high-consequence work.
-
-Astra must not become the default for ordinary high-risk work merely because `failcost=high`.
-
-Initial automatic ladder should be conservative:
-- Sol/high failure may escalate to Astra/low or Astra/medium depending on the existing escalation structure
-- Astra/high is allowed only after named verification failure(s)
-- Astra/xhigh and Astra/max remain explicit/manual-only options
-
-Do not silently weaken existing Sol/Luna/Terra behavior.
-
-### Astra agents
-
-Add exact model-effort custom agents only for combinations that the automatic policy can legitimately dispatch.
-
-At minimum provide bounded Astra workers for the automatic Astra tiers introduced by this brick.
-
-Every Astra worker must preserve the current safety contract:
-- exact mutable paths
-- verification evidence
-- no authority expansion
-- same-or-stricter sandbox
-- compact handoff
-- no claims for checks not run
-
-### History / registry
-
-Verified history may record Astra outcomes.
-
-Automatic history override must never promote or retain:
-- Astra xhigh
-- Astra max
-- any model/effort pair without an exact registered worker
-
-A verified failure must move through a bounded escalation chain and never loop.
-
-### Shadow-safe behavior
-
-This brick must not add any background execution or implicit model switch.
-
-The advisor may recommend Astra, but execution remains subject to the existing dispatch mechanism and capability checks.
-
-## Tests
-
-Add focused tests covering at least:
-
-- Astra accepted as a valid model
-- Astra outcome can be recorded
-- correct Astra agent mapping
-- Sol failure escalates into Astra according to the new chain
-- Astra failure escalates one bounded step
-- xhigh/max are never selected by static policy
-- xhigh/max are never selected by verified-history override
-- unknown/unregistered Astra model-effort combinations cannot claim native custom-agent readiness
-- existing Luna/Terra/Sol routing tests remain unchanged and passing
-- escalation cannot loop
-- package contract includes the new Astra agent definitions
+Keep the check strict: do not remove the count assertion and do not weaken TOML parsing.
 
 ## Validation
 
@@ -108,25 +35,31 @@ Run:
 ```bash
 python3 -m unittest discover -s .agents/skills/codex-model-router/tests -v
 python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+files = sorted(Path(".codex/agents").glob("pas_*.toml"))
+assert len(files) == 8, files
+for path in files:
+    tomllib.loads(path.read_text(encoding="utf-8"))
+print(f"validated {len(files)} agent definitions")
+PY
 git diff --check
 ```
-
-If `codex debug models` is available locally, inspect it and report whether `gpt-6-astra` and the intended effort levels are exposed. Do not fail the brick solely because a particular local account does not expose Astra; keep the code capability-gated and report the limitation.
 
 ## Commit
 
 Commit exactly:
 
 ```
-feat: add Astra routing tier
+fix: align CI with Astra agents
 ```
 
 Push normally to `dev`. Never force-push.
 
 Then STOP and report:
-- files changed
-- routing behavior added
-- tests/checks run
-- whether local Codex exposed Astra
+- file changed
+- validations and results
 - commit SHA
 - push result
