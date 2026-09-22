@@ -1,123 +1,96 @@
 # R0.02 — Deterministic task classification
 
-Status: IN PROGRESS
+Status: CORRECTION REQUIRED
 
-## Objective
+## Review finding
 
-Add a local, zero-LLM classifier that can read a structured Codex task card and derive the routing axes required by the existing advisor.
+The implementation commit `e2457a00a09355e43317b031290bc19b8c140058` passes the requested tests, but the demonstrated classification exposes a semantic-scoping bug:
 
-This brick automates classification of ONE bounded task/phase. It does not yet decompose a multi-phase prompt, invoke Graphify, launch workers, or measure quota.
+```json
+{
+  "task_family": "security-sensitive-change",
+  "failcost": "high",
+  "depth": "deep"
+}
+```
 
-The classifier must be deterministic, explainable, conservative, and safe to run before Codex spends model quota.
+R0.02 itself is not a security-sensitive change. The classifier is matching words such as `security`, `auth`, `tenant`, `migration`, `concurrency`, and `architecture` from meta-specification sections that merely describe classifier rules/tests/non-goals.
+
+This will systematically over-route task cards that discuss sensitive keywords as examples or requirements for the classifier rather than as properties of the implementation being performed.
+
+Fix only this semantic-scope issue.
 
 ## Allowed paths
 
-- .agents/skills/codex-model-router/scripts/**
-- .agents/skills/codex-model-router/tests/**
+- .agents/skills/codex-model-router/scripts/advisor.py
+- .agents/skills/codex-model-router/tests/test_advisor.py
 - .agents/skills/codex-model-router/SKILL.md
 - .agents/skills/codex-model-router/README.md
 - README.md
 - CHANGELOG.md
 
-Do not modify policy.json or any existing agent TOML in this brick.
+Do not modify policy.json, agent TOML files, CI, or unrelated files.
 
 ## Required behavior
 
-### New classifier
+### Section-aware semantic classification
 
-Add a deterministic classifier that accepts either:
-- a task-card file path; or
-- explicit task text via a testable function boundary.
+For a structured task card, semantic risk/depth signals must come from execution-relevant task content, not from the entire Markdown document.
 
-It must derive the existing routing axes:
-- task_family
-- verifiable: yes | partial | no
-- failcost: low | mid | high
-- volume: low | mid | high
-- depth: shallow | medium | deep
-- decomposable: yes | no
-- workstreams: integer >= 1
+Prefer task content from sections such as:
+- title
+- Objective
+- Required behavior
+- Acceptance criteria / acceptance
+- explicit implementation/scope requirements when present
 
-Also return:
-- confidence: low | medium | high
-- reasons: compact non-sensitive signal labels, not copied task prose
+Do NOT let the following sections raise semantic failcost/depth merely because they mention keywords as examples or meta-rules:
+- Tests
+- Validation
+- Non-goals
+- examples
+- classifier signal/rule documentation
+- completion/reporting instructions
+- commit instructions
 
-### Signals
+Allowed/mutable paths must continue to influence scope/depth separately.
+Validation sections must continue to influence verifiability separately.
+Workstreams sections must continue to influence decomposability separately.
 
-Use explicit, reviewable rules. At minimum consider:
+For unstructured/minimally structured input where no execution-relevant section can be identified, preserve a conservative fallback rather than silently treating the task as cheap.
 
-- validation/tests/check commands -> stronger verifiability
-- docs/config-only scope -> lower depth/failcost unless contradicted
-- auth/credentials/tenant/privacy/security/deletion/migration/remediation/external-write signals -> failcost floor
-- concurrency/race/distributed/cross-package/architecture signals -> depth floor
-- number and spread of allowed mutable paths -> depth/volume signals
-- multiple independent named workstreams -> decomposability/workstream count
-- missing/ambiguous acceptance or validation -> lower confidence / weaker verifiability
+### Acceptance/confidence scoping
 
-Do not infer secrets, customer data, or business-specific semantics from arbitrary prose.
+Do not infer acceptance merely because words such as `must` appear in tests, non-goals, reporting, or other meta sections.
 
-### Safety floors
+A real Required behavior / Acceptance section should still count as acceptance evidence.
 
-The classifier must be conservative:
-- security/auth/credential/tenant-isolation/remediation/destructive migration => failcost=high
-- concurrency/race/distributed invariants => depth at least medium
-- architecture/cross-cutting changes => depth=deep when scope supports it
-- no deterministic validation => verifiable cannot be yes
-- low confidence must never cause a cheaper route than a conservative fallback
+### Safety preservation
 
-Do not automatically choose a model inside the classifier. It produces axes only; the existing advisor remains the routing authority.
+Real sensitive work must still floor correctly:
+- `auth`, `credential`, `tenant`, `privacy`, `security` in Objective/Required behavior => failcost high
+- destructive migration/remediation/external-write in execution-relevant content => failcost high
+- concurrency/race/distributed invariants in execution-relevant content => depth at least medium
+- architecture/cross-cutting signals in execution-relevant content => existing architecture depth floor
 
-### CLI integration
+Do not weaken the existing conservative low-confidence fallback.
 
-Expose a CLI path that can classify a task card and emit machine-readable JSON.
-
-Preferred shape:
-
-```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py classify --task-file .github/CODEX_TASK.md
-```
-
-or an equally small compatible interface.
-
-Do not add an external dependency.
-
-### Advisor handoff
-
-Provide a deterministic way to feed the classification result into the existing recommendation/dispatch flow without manually retyping all axes.
-
-This may be:
-- a new advisor subcommand; or
-- a shared function used by classify + dispatch-from-task.
-
-Keep current explicit-axis CLI behavior backwards compatible.
-
-### Tests
+## Regression tests
 
 Add focused tests covering at least:
 
-- docs-only task -> low/shallow/verifiable when validation exists
-- ordinary bounded implementation -> mid/medium
-- auth/tenant/security task -> high failcost
-- concurrency/race task -> medium-or-deep depth floor
-- destructive migration/remediation/external-write task -> high failcost
-- no validation -> not fully verifiable
-- allowed-path spread affects depth conservatively
-- low-confidence classification cannot under-route below conservative fallback
-- deterministic identical input -> identical JSON-equivalent output
-- reasons contain signal labels and do not echo sensitive/raw task prose
-- malformed/missing task file fails safely
-- existing explicit-axis advisor CLI/tests remain passing
+1. A meta task that lists `security/auth/tenant/migration/concurrency/architecture` only under Signals/Tests/Non-goals does NOT become `security-sensitive-change` solely from those mentions.
+2. `Non-goals: do not touch auth or tenant isolation` does NOT raise failcost by itself.
+3. A real `Required behavior` containing auth/tenant/security still yields failcost=high.
+4. A real `Required behavior` containing race/concurrency still applies the depth floor.
+5. Validation commands remain detected after semantic scoping.
+6. Allowed-path spread still affects depth/volume.
+7. Low-confidence/unstructured text remains conservative.
+8. Existing 74 tests continue to pass.
 
-## Non-goals
+Use a regression fixture representative of the current R0.02 task card and demonstrate that its classification is no longer falsely security-sensitive.
 
-Do NOT:
-- decompose one prompt into plan/build/test/qa phases yet
-- integrate Graphify yet
-- call Luna/Qwen/Jev/any model
-- launch Codex workers automatically
-- change Astra escalation policy
-- add quota accounting yet
-- inspect arbitrary repository files beyond the explicitly supplied task card
+The expected exact task family/depth need not be hard-coded if other legitimate scope signals apply, but failcost must not become high solely from meta keyword mentions.
 
 ## Validation
 
@@ -129,24 +102,22 @@ python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
 git diff --check
 ```
 
-If a new Python script is added under scripts/, compile it too.
-
-Demonstrate classification on the current task card and include the resulting axes in the completion report.
+Then classify the current task card and report the result.
 
 ## Commit
 
 Commit exactly:
 
 ```
-feat: classify task cards for routing
+fix: scope task classifier signals
 ```
 
 Push normally to `dev`. Never force-push.
 
 Then STOP and report:
 - files changed
-- classification rules added
-- current task-card classification result
+- semantic section-scoping behavior
+- regression classification result
 - tests/checks run
 - commit SHA
 - push result
