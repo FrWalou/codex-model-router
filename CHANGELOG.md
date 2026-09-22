@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added GPT-6 Astra as the final evidence-gated escalation tier with bounded Low, Medium, and High workers.
+- Kept Astra xhigh/max manual-only and preserved Luna/Terra/Sol static routing.
+
 ## 0.1.0 - 2026-07-15
 
 - Added deterministic routing across GPT-5.6 Luna, Terra, and Sol.

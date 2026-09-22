@@ -1,6 +1,7 @@
 {
-  "policy_version": "2026-07-15.v2",
+  "policy_version": "2026-09-22.v3",
   "model_version": "gpt-5.6",
+  "supported_model_versions": ["gpt-5.6", "gpt-6"],
   "max_record_age_days": 90,
   "rules": [
     {
@@ -11,7 +12,7 @@
       },
       "model": "gpt-5.6-sol",
       "effort": "high",
-      "escalation": "Clarify unresolved authority or domain decisions before execution; use Max only after a focused High run fails a named check."
+      "escalation": "Clarify unresolved authority or domain decisions before execution; after a focused Sol High run fails a named check, use the bounded Astra escalation chain."
     },
     {
       "id": "high-risk-ambiguous-work",

@@ -13,6 +13,9 @@ EXPECTED_AGENTS = {
     "pas_terra_builder.toml": ("pas_terra_builder", "gpt-5.6-terra", "high"),
     "pas_sol_analyst.toml": ("pas_sol_analyst", "gpt-5.6-sol", "high"),
     "pas_sol_max_worker.toml": ("pas_sol_max_worker", "gpt-5.6-sol", "max"),
+    "pas_astra_low_worker.toml": ("pas_astra_low_worker", "gpt-6-astra", "low"),
+    "pas_astra_medium_worker.toml": ("pas_astra_medium_worker", "gpt-6-astra", "medium"),
+    "pas_astra_high_worker.toml": ("pas_astra_high_worker", "gpt-6-astra", "high"),
 }
 
 
@@ -32,6 +35,14 @@ class ProjectAgentContractTests(unittest.TestCase):
                 self.assertIn("mutable paths", text.lower())
                 self.assertIn("verification evidence", text.lower())
                 self.assertIn("missing authority", text.lower())
+
+    def test_astra_agents_require_same_or_stricter_sandbox(self):
+        for filename in EXPECTED_AGENTS:
+            if not filename.startswith("pas_astra_"):
+                continue
+            with self.subTest(filename=filename):
+                text = (AGENT_DIR / filename).read_text(encoding="utf-8")
+                self.assertIn("same-or-stricter sandbox", text.lower())
 
 
 class SkillDocumentationContractTests(unittest.TestCase):

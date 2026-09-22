@@ -15,8 +15,22 @@ from typing import Any, Mapping
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_POLICY = HERE.parent / "references" / "policy.json"
-VALID_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}
-VALID_EFFORTS = {"low", "medium", "high", "max", "ultra"}
+VALID_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"}
+VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+LEGACY_GPT_5_6_EFFORTS = {"low", "medium", "high", "max", "ultra"}
+MODEL_EFFORTS = {
+    "gpt-5.6-luna": LEGACY_GPT_5_6_EFFORTS,
+    "gpt-5.6-terra": LEGACY_GPT_5_6_EFFORTS,
+    "gpt-5.6-sol": LEGACY_GPT_5_6_EFFORTS,
+    "gpt-6-astra": {"low", "medium", "high", "xhigh", "max"},
+}
+MODEL_VERSIONS = {
+    "gpt-5.6-luna": "gpt-5.6",
+    "gpt-5.6-terra": "gpt-5.6",
+    "gpt-5.6-sol": "gpt-5.6",
+    "gpt-6-astra": "gpt-6",
+}
+AUTOMATIC_FORBIDDEN_EFFORTS = {"xhigh", "max", "ultra"}
 VALID_OUTCOMES = {"verified_pass", "verified_fail", "partial"}
 VALID_DISPATCH_MODES = {
     "native_custom_agent",
@@ -31,6 +45,9 @@ MODEL_AGENTS = {
     ("gpt-5.6-terra", "high"): "pas_terra_builder",
     ("gpt-5.6-sol", "high"): "pas_sol_analyst",
     ("gpt-5.6-sol", "max"): "pas_sol_max_worker",
+    ("gpt-6-astra", "low"): "pas_astra_low_worker",
+    ("gpt-6-astra", "medium"): "pas_astra_medium_worker",
+    ("gpt-6-astra", "high"): "pas_astra_high_worker",
 }
 SANDBOX_RANK = {
     "read-only": 0,
@@ -43,7 +60,9 @@ ESCALATION_CHAIN = {
     ("gpt-5.6-luna", "medium"): ("gpt-5.6-terra", "medium"),
     ("gpt-5.6-terra", "medium"): ("gpt-5.6-terra", "high"),
     ("gpt-5.6-terra", "high"): ("gpt-5.6-sol", "high"),
-    ("gpt-5.6-sol", "high"): ("gpt-5.6-sol", "max"),
+    ("gpt-5.6-sol", "high"): ("gpt-6-astra", "low"),
+    ("gpt-6-astra", "low"): ("gpt-6-astra", "medium"),
+    ("gpt-6-astra", "medium"): ("gpt-6-astra", "high"),
 }
 ALLOWED_RECORD_FIELDS = {
     "recorded_at",
@@ -111,6 +130,9 @@ def recommend(
         if _matches(rule.get("match", {}), axes):
             selected = rule
             break
+
+    if selected["effort"] in AUTOMATIC_FORBIDDEN_EFFORTS:
+        raise ValueError("static policy must not automatically select xhigh, max, or ultra")
 
     ultra = policy["ultra"]
     ultra_eligible = (
@@ -245,8 +267,18 @@ def append_record(
         raise ValueError(f"record missing fields: {sorted(missing)}")
     if record["model"] not in VALID_MODELS:
         raise ValueError(f"unsupported model: {record['model']}")
+    expected_model_version = MODEL_VERSIONS[str(record["model"])]
+    if record["model_version"] != expected_model_version:
+        raise ValueError(
+            f"model_version {record['model_version']!r} does not match "
+            f"model {record['model']!r} ({expected_model_version!r})"
+        )
     if record["effort"] not in VALID_EFFORTS:
         raise ValueError(f"unsupported effort: {record['effort']}")
+    if record["effort"] not in MODEL_EFFORTS[str(record["model"])]:
+        raise ValueError(
+            f"unsupported effort {record['effort']!r} for model {record['model']!r}"
+        )
     if record["outcome"] not in VALID_OUTCOMES:
         raise ValueError(f"unsupported outcome: {record['outcome']}")
     dispatch_mode = str(record.get("dispatch_mode", "")).strip()
@@ -341,7 +373,9 @@ def apply_history(
         for (model, effort), count in passes.items()
         if count >= 2
         and (model, effort) in MODEL_AGENTS
-        and effort not in {"max", "ultra"}
+        and MODEL_VERSIONS.get(str(model))
+        == result.get("model_version", MODEL_VERSIONS.get(str(result.get("model"))))
+        and effort not in {"xhigh", "max", "ultra"}
         and (model, effort) not in failures
     ]
     if stable:
@@ -350,6 +384,7 @@ def apply_history(
             {
                 "model": model,
                 "effort": effort,
+                "model_version": MODEL_VERSIONS[str(model)],
                 "rule_id": "verified-history",
                 "history_basis": f"{count} recent verified passes",
             }
@@ -357,7 +392,12 @@ def apply_history(
     elif (result["model"], result["effort"]) in failures:
         failed_combo = (str(result["model"]), str(result["effort"]))
         next_combo = ESCALATION_CHAIN.get(failed_combo)
+        visited = {failed_combo}
         while next_combo in failures:
+            if next_combo in visited:
+                next_combo = None
+                break
+            visited.add(next_combo)
             next_combo = ESCALATION_CHAIN.get(next_combo)
         if next_combo is None:
             result["dispatch_blocked"] = True
@@ -367,6 +407,7 @@ def apply_history(
                 {
                     "model": next_combo[0],
                     "effort": next_combo[1],
+                    "model_version": MODEL_VERSIONS[next_combo[0]],
                     "rule_id": "verified-failure-escalation",
                     "history_basis": (
                         f"verified failure for {failed_combo[0]} · {failed_combo[1]}"
@@ -390,14 +431,18 @@ def _recommend_command(args: argparse.Namespace, *, phase: str | None = None) ->
         "workstreams": args.workstreams,
     }
     base = recommend(policy, task_family=args.task_family, axes=axes)
-    history = query_records(
-        args.registry,
-        task_family=args.task_family,
-        model_version=policy["model_version"],
-        max_age_days=int(policy.get("max_record_age_days", 90)),
-        axes=axes,
-        phase=phase,
-    )
+    history = []
+    for model_version in policy.get("supported_model_versions", [policy["model_version"]]):
+        history.extend(
+            query_records(
+                args.registry,
+                task_family=args.task_family,
+                model_version=model_version,
+                max_age_days=int(policy.get("max_record_age_days", 90)),
+                axes=axes,
+                phase=phase,
+            )
+        )
     return apply_history(base, history)
 
 
@@ -496,7 +541,7 @@ def main() -> int:
                 "outcome": args.outcome,
                 "verification_command": args.verification_command,
                 "verification_result": args.verification_result,
-                "model_version": policy["model_version"],
+                "model_version": MODEL_VERSIONS[args.model],
                 "policy_version": policy["policy_version"],
                 "session_id": session_id,
                 "failure_type": args.failure_type,
@@ -510,12 +555,18 @@ def main() -> int:
         return 0
     if args.command == "query":
         policy = load_policy(args.policy)
-        records = query_records(
-            args.registry,
-            task_family=args.task_family,
-            model_version=policy["model_version"],
-            max_age_days=args.max_age_days or int(policy.get("max_record_age_days", 90)),
-        )
+        records = []
+        for model_version in policy.get("supported_model_versions", [policy["model_version"]]):
+            records.extend(
+                query_records(
+                    args.registry,
+                    task_family=args.task_family,
+                    model_version=model_version,
+                    max_age_days=args.max_age_days
+                    or int(policy.get("max_record_age_days", 90)),
+                )
+            )
+        records.sort(key=lambda item: _parse_timestamp(item["recorded_at"]), reverse=True)
         print(json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "session":

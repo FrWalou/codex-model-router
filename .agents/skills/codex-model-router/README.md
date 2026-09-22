@@ -1,6 +1,6 @@
 # Codex Model Router
 
-Codex Model Router is a repository-scoped skill and custom-agent package for using GPT-5.6 Sol, Terra, and Luna intentionally inside one visible Codex conversation.
+Codex Model Router is a repository-scoped skill and custom-agent package for using GPT-5.6 Luna, Terra, Sol, and GPT-6 Astra intentionally inside one visible Codex conversation.
 
 The main conversation stays in control of requirements, approvals, and final integration. Bounded planning, implementation, test, and QA slices can be delegated automatically to model-specific workers. The router does not silently switch the model of the active conversation.
 
@@ -11,6 +11,7 @@ Picking one expensive model for an entire coding task is simple but wasteful. Pi
 - GPT-5.6 Sol handles deep architecture, ambiguity, and high-failure-cost QA.
 - GPT-5.6 Terra handles everyday implementation, integration, and moderately complex debugging.
 - GPT-5.6 Luna handles repeatable, validator-backed, high-volume, and deterministic test work.
+- GPT-6 Astra is a final, evidence-gated escalation tier for genuinely difficult or high-consequence work after Sol.
 
 The choice is not made from phase names alone. A difficult test investigation may need Sol; a mechanical planning inventory may need Luna. The deterministic advisor considers verifiability, failure cost, volume, depth, decomposability, and verified historical outcomes.
 
@@ -23,6 +24,7 @@ flowchart LR
     R -->|Luna| L[pas_luna_worker]
     R -->|Terra| T[pas_terra_builder]
     R -->|Sol| S[pas_sol_analyst]
+    S -->|Named verification failure| A[pas_astra_low_worker]
     L --> E[Verification evidence]
     T --> E
     S --> E
@@ -49,7 +51,10 @@ your-repository/
         ├── pas_terra_worker.toml
         ├── pas_terra_builder.toml
         ├── pas_sol_analyst.toml
-        └── pas_sol_max_worker.toml
+        ├── pas_sol_max_worker.toml
+        ├── pas_astra_low_worker.toml
+        ├── pas_astra_medium_worker.toml
+        └── pas_astra_high_worker.toml
 ```
 
 From a checkout of this package:
@@ -74,7 +79,7 @@ Repository-scoped installation is recommended first. It keeps policy, custom wor
 
 ### Requirements
 
-- A current Codex CLI or Codex application with GPT-5.6 Sol, Terra, and Luna available to the signed-in account.
+- A current Codex CLI or Codex application with GPT-5.6 Sol, Terra, Luna, and (for Astra escalation) GPT-6 Astra available to the signed-in account.
 - Tested with Codex CLI `0.144.4`; newer releases should be revalidated when model slugs or custom-agent schema change.
 - Python 3.9 or newer for the advisor.
 - Native custom-agent support for the preferred dispatch path.
@@ -191,7 +196,7 @@ python3 .agents/skills/codex-model-router/scripts/advisor.py record \
   --verification-result '28 passed'
 ```
 
-History overrides static policy only for a registered exact model-effort agent when the same task family, axes, phase, and model generation have at least two recent verified passes and no verified failure. Max, Ultra, and legacy unregistered combinations are never eligible for automatic override. A verified failure moves the next dispatch away from the failed combination through a bounded escalation chain. Records older than the configured TTL are ignored.
+History overrides static policy only for a registered exact model-effort agent when the same task family, axes, phase, and model generation have at least two recent verified passes and no verified failure. Astra xhigh/max, Max, Ultra, and legacy unregistered combinations are never eligible for automatic override. A verified failure moves the next dispatch away from the failed combination through a bounded escalation chain. Records older than the configured TTL are ignored.
 
 ## Escalation
 
@@ -202,7 +207,7 @@ Escalate from observed failure, not intuition:
 - Stop if the same failure repeats without new evidence.
 - Do not substitute higher reasoning effort for missing permissions, authority, requirements, or domain sources.
 
-Ultra is never selected automatically. It is only an explicit option for deep, high-failure-cost work with at least three independently verifiable workstreams.
+The static policy remains Luna/Terra/Sol. A named Sol High verification failure moves through Astra Low, Astra Medium, then Astra High; a further Astra High failure blocks dispatch. Astra xhigh/max and Ultra are never selected automatically and remain explicit/manual-only options.
 
 ## Safety boundaries
 
@@ -276,7 +281,10 @@ Validate agent TOML against the current model catalog with Python 3.12 `tomllib`
 ├── pas_terra_worker.toml
 ├── pas_terra_builder.toml
 ├── pas_sol_analyst.toml
-└── pas_sol_max_worker.toml
+├── pas_sol_max_worker.toml
+├── pas_astra_low_worker.toml
+├── pas_astra_medium_worker.toml
+└── pas_astra_high_worker.toml
 ```
 
 ## Release hygiene

@@ -99,6 +99,11 @@ class AdvisorPolicyTests(unittest.TestCase):
         self.assertTrue(result["ultra_eligible"])
         self.assertIn("explicit", result["ultra_note"].lower())
 
+    def test_static_policy_never_selects_xhigh_or_max(self):
+        for selected in [*self.policy["rules"], self.policy["fallback"]]:
+            with self.subTest(rule=selected["id"]):
+                self.assertNotIn(selected["effort"], {"xhigh", "max"})
+
     def test_unknown_session_is_reported_instead_of_scanning_rollouts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             fake_home = Path(temp_dir)
@@ -163,6 +168,32 @@ class AdvisorPolicyTests(unittest.TestCase):
 
         self.assertEqual(terra["agent_name"], "pas_terra_worker")
         self.assertEqual(sol["agent_name"], "pas_sol_max_worker")
+
+    def test_astra_automatic_tiers_map_to_exact_workers(self):
+        for effort, agent_name in (
+            ("low", "pas_astra_low_worker"),
+            ("medium", "pas_astra_medium_worker"),
+            ("high", "pas_astra_high_worker"),
+        ):
+            with self.subTest(effort=effort):
+                result = self.advisor.build_dispatch(
+                    {"model": "gpt-6-astra", "effort": effort},
+                    phase="qa",
+                    task_scope="phase",
+                )
+                self.assertEqual(result["agent_name"], agent_name)
+                self.assertTrue(result["native_custom_agent_ready"])
+
+    def test_unregistered_astra_efforts_cannot_claim_native_agent_readiness(self):
+        for effort in ("xhigh", "max"):
+            with self.subTest(effort=effort):
+                result = self.advisor.build_dispatch(
+                    {"model": "gpt-6-astra", "effort": effort},
+                    phase="qa",
+                    task_scope="phase",
+                )
+                self.assertIsNone(result["agent_name"])
+                self.assertFalse(result["native_custom_agent_ready"])
 
     def test_exec_fallback_is_blocked_without_explicit_boundary_confirmation(self):
         result = self.advisor.build_dispatch(
@@ -430,6 +461,117 @@ class AdvisorRegistryTests(unittest.TestCase):
         self.assertEqual(result["effort"], "high")
         self.assertEqual(result["rule_id"], "high-risk-deep-work")
 
+    def test_astra_xhigh_and_max_history_never_become_automatic_overrides(self):
+        recommendation = {
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "rule_id": "high-risk-deep-work",
+        }
+        for effort in ("xhigh", "max"):
+            with self.subTest(effort=effort):
+                result = self.advisor.apply_history(
+                    recommendation,
+                    [
+                        {"model": "gpt-6-astra", "effort": effort, "outcome": "verified_pass"},
+                        {"model": "gpt-6-astra", "effort": effort, "outcome": "verified_pass"},
+                    ],
+                )
+                self.assertEqual((result["model"], result["effort"]), ("gpt-5.6-sol", "high"))
+
+    def test_astra_outcome_can_be_recorded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "outcomes.jsonl"
+            saved = self.advisor.append_record(
+                path,
+                {
+                    "task_family": "architecture-migration",
+                    "axes": {"verifiable": "partial"},
+                    "model": "gpt-6-astra",
+                    "effort": "low",
+                    "outcome": "verified_pass",
+                    "verification_command": "python3 -m unittest",
+                    "verification_result": "pass",
+                    "model_version": "gpt-6",
+                    "policy_version": "2026-09-22.v3",
+                    "session_id": "worker-456",
+                    "phase": "qa",
+                    "agent_name": "pas_astra_low_worker",
+                    "dispatch_mode": "native_custom_agent",
+                },
+            )
+
+        self.assertEqual((saved["model"], saved["effort"]), ("gpt-6-astra", "low"))
+
+    def test_astra_ultra_outcome_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "unsupported effort"):
+                self.advisor.append_record(
+                    Path(temp_dir) / "outcomes.jsonl",
+                    {
+                        "task_family": "architecture-migration",
+                        "axes": {"verifiable": "partial"},
+                        "model": "gpt-6-astra",
+                        "effort": "ultra",
+                        "outcome": "partial",
+                        "model_version": "gpt-6",
+                        "policy_version": "2026-09-22.v3",
+                        "session_id": "worker-456",
+                    },
+                )
+
+    def test_astra_record_rejects_mismatched_model_generation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "does not match model"):
+                self.advisor.append_record(
+                    Path(temp_dir) / "outcomes.jsonl",
+                    {
+                        "task_family": "architecture-migration",
+                        "axes": {"verifiable": "partial"},
+                        "model": "gpt-6-astra",
+                        "effort": "low",
+                        "outcome": "partial",
+                        "model_version": "gpt-5.6",
+                        "policy_version": "2026-09-22.v3",
+                        "session_id": "worker-456",
+                    },
+                )
+
+    def test_astra_passes_do_not_override_a_gpt_5_6_recommendation(self):
+        recommendation = {
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "model_version": "gpt-5.6",
+            "rule_id": "high-risk-deep-work",
+        }
+        records = [
+            {"model": "gpt-6-astra", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-6-astra", "effort": "medium", "outcome": "verified_pass"},
+        ]
+
+        result = self.advisor.apply_history(recommendation, records)
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-5.6-sol", "high"))
+
+    def test_xhigh_does_not_expand_legacy_model_efforts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+                with self.subTest(model=model), self.assertRaisesRegex(
+                    ValueError, "unsupported effort"
+                ):
+                    self.advisor.append_record(
+                        Path(temp_dir) / "outcomes.jsonl",
+                        {
+                            "task_family": "legacy-compatibility",
+                            "axes": {"verifiable": "yes"},
+                            "model": model,
+                            "effort": "xhigh",
+                            "outcome": "partial",
+                            "model_version": "gpt-5.6",
+                            "policy_version": "2026-09-22.v3",
+                            "session_id": "worker-456",
+                        },
+                    )
+
     def test_unregistered_model_effort_history_never_overrides_policy(self):
         recommendation = {
             "model": "gpt-5.6-sol",
@@ -465,6 +607,44 @@ class AdvisorRegistryTests(unittest.TestCase):
         )
         self.assertEqual(result["rule_id"], "verified-failure-escalation")
 
+    def test_sol_failure_escalates_to_astra_then_astra_escalates_one_step(self):
+        sol_failure = self.advisor.apply_history(
+            {"model": "gpt-5.6-sol", "effort": "high", "rule_id": "high-risk-deep-work"},
+            [{"model": "gpt-5.6-sol", "effort": "high", "outcome": "verified_fail"}],
+        )
+        astra_failure = self.advisor.apply_history(
+            {"model": "gpt-6-astra", "effort": "low", "rule_id": "verified-failure-escalation"},
+            [{"model": "gpt-6-astra", "effort": "low", "outcome": "verified_fail"}],
+        )
+
+        self.assertEqual((sol_failure["model"], sol_failure["effort"]), ("gpt-6-astra", "low"))
+        self.assertEqual(sol_failure["model_version"], "gpt-6")
+        self.assertEqual((astra_failure["model"], astra_failure["effort"]), ("gpt-6-astra", "medium"))
+
+    def test_escalation_cycle_is_blocked_instead_of_looping(self):
+        original_chain = self.advisor.ESCALATION_CHAIN
+        self.advisor.ESCALATION_CHAIN = {
+            ("gpt-5.6-sol", "high"): ("gpt-6-astra", "low"),
+            ("gpt-6-astra", "low"): ("gpt-5.6-sol", "high"),
+        }
+        try:
+            result = self.advisor.apply_history(
+                {
+                    "model": "gpt-5.6-sol",
+                    "effort": "high",
+                    "model_version": "gpt-5.6",
+                    "rule_id": "high-risk-deep-work",
+                },
+                [
+                    {"model": "gpt-5.6-sol", "effort": "high", "outcome": "verified_fail"},
+                    {"model": "gpt-6-astra", "effort": "low", "outcome": "verified_fail"},
+                ],
+            )
+        finally:
+            self.advisor.ESCALATION_CHAIN = original_chain
+
+        self.assertTrue(result["dispatch_blocked"])
+
     def test_exhausted_escalation_chain_blocks_every_dispatch_path(self):
         recommendation = self.advisor.apply_history(
             {
@@ -474,7 +654,9 @@ class AdvisorRegistryTests(unittest.TestCase):
             },
             [
                 {"model": "gpt-5.6-sol", "effort": "high", "outcome": "verified_fail"},
-                {"model": "gpt-5.6-sol", "effort": "max", "outcome": "verified_fail"},
+                {"model": "gpt-6-astra", "effort": "low", "outcome": "verified_fail"},
+                {"model": "gpt-6-astra", "effort": "medium", "outcome": "verified_fail"},
+                {"model": "gpt-6-astra", "effort": "high", "outcome": "verified_fail"},
             ],
         )
 
