@@ -1,32 +1,30 @@
-# R0.03 — Prompt input and deterministic phase planning
+# R0.03 — Execute one routed task end-to-end
 
 Status: IN PROGRESS
 
 ## Objective
 
-Add the first user-facing prompt entry point for the router.
+Stop adding planning features and make the router actually useful.
 
-The router must accept either a raw prompt or a structured task card, deterministically decompose the requested work into a small set of bounded execution phases, classify each phase with the existing R0.02 classifier, and attach the existing GPT-6 model/effort recommendation to each phase.
-
-This brick PLANS routing only. It must not launch Codex workers yet.
-
-Target flow:
+Implement the smallest end-to-end execution path for ONE already-bounded task card:
 
 ```text
-prompt / task card
-      ↓
-deterministic phase planner
-      ↓
-bounded phases
-      ↓
-existing classifier per phase
-      ↓
-existing advisor per phase
-      ↓
-machine-readable routing plan
+CODEX_TASK.md
+    ↓
+existing classifier
+    ↓
+existing GPT-6 router
+    ↓
+selected model + effort
+    ↓
+codex exec
+    ↓
+worker result
 ```
 
-Keep this brick intentionally smaller than the full R0.03 vision. Graphify enrichment will be the next sub-brick after this planner is stable.
+No raw-prompt input. No prompt decomposition. No Graphify. No learning. No stats aggregation.
+
+The goal of this brick is simple: given a structured task card, the router must be able to select the right existing worker/model/effort and actually launch Codex to execute that bounded task.
 
 ## Allowed paths
 
@@ -39,231 +37,154 @@ Keep this brick intentionally smaller than the full R0.03 vision. Graphify enric
 
 Do not modify:
 - policy.json
-- any .codex/agents/*.toml
+- .codex/agents/**
 - CI
 - .github/CODEX_TASK.md
 
-## Prompt entry points
+## Required CLI
 
-Add a deterministic CLI entry point that accepts exactly one of:
-
-```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py plan-prompt \
-  --prompt "Implement the change, add tests, and review auth safety."
-```
-
-or:
+Add a single execution command, for example:
 
 ```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py plan-prompt \
-  --task-file .github/CODEX_TASK.md
+python3 .agents/skills/codex-model-router/scripts/advisor.py run-task \
+  --task-file .github/CODEX_TASK.md \
+  --phase build \
+  --parent-sandbox workspace-write \
+  --exec-sandbox workspace-write \
+  --parent-approval-policy on-request \
+  --approval-boundary-confirmed
 ```
 
-An equivalent small interface is acceptable, but:
-- raw prompt input must be supported
-- task-file input must be supported
-- the two inputs must be mutually exclusive
-- malformed/empty input must fail safely
-- no external dependency may be added
+Equivalent naming is acceptable, but keep the interface minimal.
 
-Do not persist raw prompts.
+The command must:
 
-## Phase model
+1. read the supplied task card
+2. classify it with the existing R0.02 classifier
+3. obtain the recommendation with the existing GPT-6 router
+4. build the existing dispatch contract
+5. refuse execution unless `codex_exec_ready=true`
+6. launch exactly one bounded `codex exec` worker using the recommended model + effort
+7. pass the task card content to the child as the bounded task
+8. preserve the exact parent approval policy and same-or-stricter sandbox
+9. capture the child exit code and compact result
+10. return a machine-readable execution summary
 
-Use only the existing execution phase vocabulary:
+Do not silently fall back to another model when the selected one cannot launch.
 
-- `plan`
-- `build`
-- `test`
-- `qa`
+## Execution contract
 
-A routing plan may contain more than one bounded `build` phase only when the prompt/task card names independently separable workstreams.
+The child prompt must clearly state:
 
-Every phase object must contain at least:
+- execute only the supplied bounded task
+- honor the task card's allowed paths
+- do not widen scope
+- run the validation requested by the task card
+- report changed paths and verification evidence
+- stop on missing authority or unavailable capability
 
-- `phase_id`: stable deterministic ID within the plan
-- `phase`: plan | build | test | qa
-- `task_family`
-- `classification`
-- `model`
-- `effort`
-- `rule_id`
-- `reason_labels`: compact non-sensitive labels
-- `depends_on`: phase IDs
-- `parallelizable`: boolean
+Do not add unrelated orchestration logic.
 
-Do not include hidden reasoning or copied sensitive/raw prompt content in the machine-readable plan.
+## Scope protection
 
-## Deterministic phase-planning rules
+Before execution:
+- reject missing or malformed task files
+- reject execution when approval/sandbox boundary is not explicit and safe
+- reject execution when no exact worker/model-effort mapping exists
 
-Use explicit reviewable rules, not an LLM.
+After execution:
+- collect the worker-reported changed paths
+- if the child output exposes changed paths outside the task card's allowed paths, mark the execution as rejected/out-of-scope
 
-### Build
+Do not attempt automatic rollback in this brick.
 
-Create a `build` phase for implementation/change work.
+## Output
 
-Documentation/config-only work still uses `build`; the existing classifier may route it cheaply.
+Return JSON containing at least:
 
-### Test
+- task_family
+- classification
+- model
+- effort
+- agent_name
+- dispatch_mode
+- child_exit_code
+- execution_status: success | failed | blocked | out_of_scope
+- changed_paths when reported
+- verification_evidence when reported
 
-Create a `test` phase when:
-- the task has deterministic validation/test commands; or
-- the task explicitly asks to add/run tests/checks.
+Do not persist raw task contents.
 
-The test phase should be independently classified. It should not inherit high failcost merely because the build phase is security-sensitive, unless the test work itself carries that risk.
+## Outcome recording
 
-### QA
+Keep this minimal.
 
-Create a `qa` phase when:
-- the task explicitly asks for review/audit/QA; or
-- execution-relevant content is security/auth/credential/tenant/privacy/remediation/destructive-migration sensitive; or
-- the build classification has high failcost.
+If the child completes and provides verification evidence:
+- reuse the existing outcome registry format
+- record the actual model, effort, phase, agent_name, dispatch_mode and verified result
 
-QA should preserve the relevant safety floor and normally depend on build + test where both exist.
+If verification is missing or ambiguous:
+- record `partial`, not `verified_pass`
 
-### Plan
-
-Create a `plan` phase only when planning materially helps, such as:
-- architecture/cross-cutting work
-- deep scope
-- multiple independent workstreams
-- explicitly requested design/planning
-
-Do not add a planning phase to every trivial task.
-
-## Workstream decomposition
-
-If the supplied structured task card contains multiple explicitly named independently verifiable workstreams using the existing R0.02 workstream semantics:
-
-- produce one bounded build phase per workstream
-- preserve deterministic ordering
-- mark truly independent build phases `parallelizable=true`
-- make test/QA dependencies explicit
-
-Do not infer arbitrary parallel workstreams from prose.
-
-For raw prompts without explicit structured workstreams, default to one build phase.
-
-## Phase classification
-
-Reuse the R0.02 classifier rather than implementing a second risk model.
-
-Phase-specific classification must avoid semantic leakage between phases.
-
-Examples:
-- build auth change -> high failcost
-- deterministic test execution -> should not automatically become high failcost just because the build phase touched auth
-- QA of auth change -> retain high safety relevance
-- docs-only build -> shallow/low when appropriate
-
-The existing R0.02 section-aware semantics and conservative fallback remain authoritative.
-
-## Routing
-
-For each phase:
-1. derive phase-specific classification
-2. call the existing recommendation path
-3. attach exact GPT-6 model + effort recommendation
-
-Expected examples under the current R0.02.1 policy may include:
-- repeatable validation/test work -> GPT-6 Luna Medium
-- normal bounded build -> GPT-6 Sol Medium
-- deep/high-risk build or QA -> GPT-6 Sol High
-- Astra must NOT be selected statically
-
-Do not implement verified-failure escalation inside planning; escalation still requires an actual recorded failure.
-
-## Dependencies
-
-The plan must encode execution order.
-
-Examples:
-
-```text
-plan -> build -> test -> qa
-```
-
-or for independent workstreams:
-
-```text
-plan
-  ├─ build-1
-  └─ build-2
-       ↓
-      test
-       ↓
-       qa
-```
-
-Do not mark write phases parallelizable unless workstreams are explicitly independently verifiable.
-
-## Privacy / persistence
-
-- Do not write raw prompts to outcomes.jsonl or any state file.
-- Do not add automatic persistence in this brick.
-- Machine-readable reason labels must not echo prompt text.
-- Existing registry privacy contracts remain unchanged.
+Do not add stats.json or learning yet.
 
 ## Non-goals
 
 Do NOT:
-- call Graphify yet
-- launch Codex/custom agents
-- call `codex exec`
-- mutate repository files from the planner
-- add outcome aggregation or stats.json
-- add auto-learning/contextual bandits
-- measure quota
-- change GPT-6 routing policy
-- alter worker definitions
-- automatically select Astra
-- add unrestricted autonomous execution
+- accept arbitrary raw prompts
+- decompose tasks into plan/build/test/qa
+- call Graphify
+- run multiple workers
+- parallelize
+- add auto-learning
+- add contextual bandits
+- add quota accounting
+- add a scheduler
+- change routing policy
+- change worker definitions
+- automatically commit or push unless the supplied task card itself explicitly requires it
 
 ## Tests
 
 Add focused tests covering at least:
 
-1. raw ordinary implementation -> one build phase -> GPT-6 Sol Medium
-2. raw implementation + explicit tests -> build + test
-3. security/auth implementation -> build + qa, with relevant high safety classification
-4. deep architecture task -> plan + build
-5. structured card with validation -> test phase
-6. explicit review/audit -> qa phase
-7. independently verifiable named workstreams -> multiple build phases with deterministic IDs
-8. non-independent workstreams -> single build phase
-9. phase dependencies are deterministic and acyclic
-10. no static phase selects Astra
-11. test phase does not inherit unrelated build security keywords
-12. QA preserves relevant security floor
-13. identical prompt -> identical JSON-equivalent plan
-14. empty prompt fails safely
-15. missing task file fails safely
-16. --prompt and --task-file together fail safely
-17. reason labels do not echo a secret-looking token from input
-18. existing 102+ repository tests remain passing
-19. existing explicit-axis/classify/recommend/dispatch CLIs remain backwards compatible
+1. valid bounded task selects the expected GPT-6 model/effort
+2. unsafe sandbox boundary blocks execution
+3. missing approval policy blocks execution
+4. missing task file fails safely
+5. malformed task card fails safely
+6. no exact registered worker blocks execution
+7. child command pins recommended model
+8. child command pins recommended effort
+9. child command preserves exact approval policy
+10. child command uses same-or-stricter sandbox
+11. child non-zero exit -> failed
+12. missing verification -> partial outcome
+13. reported out-of-scope changed path -> out_of_scope
+14. successful verified execution -> verified_pass record
+15. raw task text is not written to the registry
+16. existing 102+ tests remain passing
+17. existing classify/recommend/dispatch CLI behavior remains backward compatible
 
-## Demonstration
+Mock the child process in unit tests. Do not consume Codex quota in the automated test suite.
 
-Demonstrate machine-readable plans for:
+## Real smoke test
 
-### A. Simple implementation
+After unit tests pass, perform ONE real local smoke test with a tiny temporary task card that is:
+- read-only or changes only a temporary fixture
+- deterministic
+- cheap
+- explicitly bounded
 
-```text
-Add a deterministic helper and run its unit tests.
-```
+The real smoke test must prove that:
+- the router selected the model/effort
+- `codex exec` actually launched
+- the child returned
+- the router produced the execution summary
 
-### B. Security-sensitive implementation
+Do not use Astra for the smoke test.
 
-```text
-Add tenant-scoped credential validation, add deterministic tests, and perform a security review.
-```
-
-### C. Structured multi-workstream task card
-
-Use a temporary fixture with two explicitly independently verifiable workstreams and show the dependency graph in JSON.
-
-Report the exact model + effort chosen for every phase.
+If running a real Codex child would consume an unreasonable remaining quota, report that and stop after the mocked integration tests instead of burning the quota.
 
 ## Validation
 
@@ -275,23 +196,25 @@ python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
 git diff --check
 ```
 
-Compile any new Python module added under `scripts/`.
+Compile any new Python module under `scripts/`.
 
 ## Commit
 
 Commit exactly:
 
 ```
-feat: plan routed phases from prompts
+feat: execute routed Codex tasks
 ```
 
 Push normally to `dev`. Never force-push.
 
 Then STOP and report:
 - files changed
-- prompt input interface
-- phase-planning rules
-- demonstration plans
+- run-task CLI
+- routing decision used in tests
+- mocked integration results
+- real smoke-test result, if executed
+- outcome-recording behavior
 - tests/checks
 - commit SHA
 - push result
