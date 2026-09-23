@@ -1,30 +1,42 @@
-# R0.03 — Execute one routed task end-to-end
+# R0.03 correction — Purify router to decision-only
 
-Status: IN PROGRESS
+Status: CORRECTION REQUIRED
+
+## Architectural boundary
+
+`codex-model-router` is a pure decision component.
+
+It may:
+- classify a bounded task descriptor
+- read routing policy
+- optionally read previously produced outcome/history data
+- choose model + reasoning effort
+- expose exact registered worker mapping
+- expose the next bounded escalation candidate
+- return machine-readable routing JSON
+
+It must NOT:
+- launch Codex or call `codex exec`
+- spawn subprocesses
+- execute tests
+- inspect or mutate Git/repositories
+- record outcomes or write telemetry/statistics
+- decompose prompts
+- call Graphify
+- orchestrate/schedule/parallelize workers
+- auto-learn or rewrite policy
+
+Execution, outcome collection, graph inspection, planning/decomposition, learning, and orchestration will be separate composable tools.
+
+## Review finding
+
+Commit `8a02f2879ed4880005e84aaf9bd054c769e2dedc` added `run-task`, subprocess execution, post-execution scope checks, and outcome recording. Those behaviors are outside the router responsibility.
+
+Remove that execution behavior while preserving routing functionality from R0.01–R0.02.1.
 
 ## Objective
 
-Stop adding planning features and make the router actually useful.
-
-Implement the smallest end-to-end execution path for ONE already-bounded task card:
-
-```text
-CODEX_TASK.md
-    ↓
-existing classifier
-    ↓
-existing GPT-6 router
-    ↓
-selected model + effort
-    ↓
-codex exec
-    ↓
-worker result
-```
-
-No raw-prompt input. No prompt decomposition. No Graphify. No learning. No stats aggregation.
-
-The goal of this brick is simple: given a structured task card, the router must be able to select the right existing worker/model/effort and actually launch Codex to execute that bounded task.
+End with: bounded task card -> classifier -> routing policy + eligible read-only history -> routing decision JSON.
 
 ## Allowed paths
 
@@ -35,186 +47,118 @@ The goal of this brick is simple: given a structured task card, the router must 
 - README.md
 - CHANGELOG.md
 
-Do not modify:
-- policy.json
-- .codex/agents/**
-- CI
-- .github/CODEX_TASK.md
+Do not modify policy.json, .codex/agents/**, CI, or .github/CODEX_TASK.md.
 
-## Required CLI
+## Remove execution behavior
 
-Add a single execution command, for example:
+Remove:
+- `run-task` CLI
+- `subprocess` use for Codex execution
+- child-output parsing used only by execution
+- post-execution changed-path enforcement
+- execution-status/result handling
+- automatic outcome recording caused by execution
+- `test_run_task.py`
+- docs claiming the router launches Codex
 
-```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py run-task \
-  --task-file .github/CODEX_TASK.md \
-  --phase build \
-  --parent-sandbox workspace-write \
-  --exec-sandbox workspace-write \
-  --parent-approval-policy on-request \
-  --approval-boundary-confirmed
-```
+No router production code path may spawn a process.
 
-Equivalent naming is acceptable, but keep the interface minimal.
+## Stable routing interface
 
-The command must:
+Expose or normalize a routing-only command, for example:
 
-1. read the supplied task card
-2. classify it with the existing R0.02 classifier
-3. obtain the recommendation with the existing GPT-6 router
-4. build the existing dispatch contract
-5. refuse execution unless `codex_exec_ready=true`
-6. launch exactly one bounded `codex exec` worker using the recommended model + effort
-7. pass the task card content to the child as the bounded task
-8. preserve the exact parent approval policy and same-or-stricter sandbox
-9. capture the child exit code and compact result
-10. return a machine-readable execution summary
+    python3 .agents/skills/codex-model-router/scripts/advisor.py route-task --task-file .github/CODEX_TASK.md --phase build
 
-Do not silently fall back to another model when the selected one cannot launch.
+It must only read/classify the task, apply existing GPT-6 routing, expose model+effort+agent, expose dispatch capability metadata without execution, expose next escalation, and return JSON.
 
-## Execution contract
+## Routing JSON contract
 
-The child prompt must clearly state:
-
-- execute only the supplied bounded task
-- honor the task card's allowed paths
-- do not widen scope
-- run the validation requested by the task card
-- report changed paths and verification evidence
-- stop on missing authority or unavailable capability
-
-Do not add unrelated orchestration logic.
-
-## Scope protection
-
-Before execution:
-- reject missing or malformed task files
-- reject execution when approval/sandbox boundary is not explicit and safe
-- reject execution when no exact worker/model-effort mapping exists
-
-After execution:
-- collect the worker-reported changed paths
-- if the child output exposes changed paths outside the task card's allowed paths, mark the execution as rejected/out-of-scope
-
-Do not attempt automatic rollback in this brick.
-
-## Output
-
-Return JSON containing at least:
-
+Return at least:
+- schema_version
 - task_family
 - classification
+- phase
 - model
 - effort
-- agent_name
-- dispatch_mode
-- child_exit_code
-- execution_status: success | failed | blocked | out_of_scope
-- changed_paths when reported
-- verification_evidence when reported
+- model_version
+- policy_version
+- rule_id
+- agent_name or null
+- automatic
+- next_escalation {model, effort} or null
+- reason_labels
+- dispatch_capability metadata only
 
-Do not persist raw task contents.
+Do not echo raw task text.
 
-## Outcome recording
+## Read-only history boundary
 
-Keep this minimal.
+The router may consume eligible historical outcome records because history can influence routing.
 
-If the child completes and provides verification evidence:
-- reuse the existing outcome registry format
-- record the actual model, effort, phase, agent_name, dispatch_mode and verified result
+The router must not create or append outcome records as part of routing.
 
-If verification is missing or ambiguous:
-- record `partial`, not `verified_pass`
+If the existing standalone `record` command is retained temporarily for compatibility, mark it deprecated and document that outcome writing will move to a separate component. Prefer removing router-side writing now if this can be done without breaking history-reading compatibility.
 
-Do not add stats.json or learning yet.
+`route-task` must always be side-effect free. Existing GPT-5.6 history remains readable and GPT-6 generation isolation remains intact.
 
-## Non-goals
+## Preserve
 
-Do NOT:
-- accept arbitrary raw prompts
-- decompose tasks into plan/build/test/qa
-- call Graphify
-- run multiple workers
-- parallelize
-- add auto-learning
-- add contextual bandits
-- add quota accounting
-- add a scheduler
-- change routing policy
-- change worker definitions
-- automatically commit or push unless the supplied task card itself explicitly requires it
+Preserve the R0.02 classifier, GPT-6 policy, manual-only xhigh/max/ultra safeguards, generation isolation, bounded escalation logic, exact worker mappings, and explicit-axis recommendation compatibility.
 
 ## Tests
 
-Add focused tests covering at least:
+Cover at least:
+1. normal bounded task -> GPT-6 Sol Medium
+2. repeatable/verifiable task -> GPT-6 Luna Medium
+3. deep/high-risk task -> GPT-6 Sol High
+4. Astra not statically selected
+5. exact agent mapping returned
+6. Luna Medium -> Sol Medium escalation
+7. Sol Medium -> Sol High escalation
+8. Sol High -> Astra Low escalation
+9. Astra High -> no next automatic escalation
+10. GPT-5.6 history cannot influence GPT-6 routing
+11. manual-only xhigh/max/ultra remain non-automatic
+12. same input + policy + history -> JSON-equivalent result
+13. `route-task` never calls subprocess
+14. `route-task` creates/modifies no files
+15. `route-task` does not append outcomes
+16. raw task prose is not emitted
+17. missing/malformed task file fails safely
+18. existing classifier/policy/history tests remain passing
 
-1. valid bounded task selects the expected GPT-6 model/effort
-2. unsafe sandbox boundary blocks execution
-3. missing approval policy blocks execution
-4. missing task file fails safely
-5. malformed task card fails safely
-6. no exact registered worker blocks execution
-7. child command pins recommended model
-8. child command pins recommended effort
-9. child command preserves exact approval policy
-10. child command uses same-or-stricter sandbox
-11. child non-zero exit -> failed
-12. missing verification -> partial outcome
-13. reported out-of-scope changed path -> out_of_scope
-14. successful verified execution -> verified_pass record
-15. raw task text is not written to the registry
-16. existing 102+ tests remain passing
-17. existing classify/recommend/dispatch CLI behavior remains backward compatible
+Delete execution-specific tests that no longer belong in this repository.
 
-Mock the child process in unit tests. Do not consume Codex quota in the automated test suite.
+## Documentation
 
-## Real smoke test
+State prominently: `codex-model-router = routing decision engine only`.
 
-After unit tests pass, perform ONE real local smoke test with a tiny temporary task card that is:
-- read-only or changes only a temporary fixture
-- deterministic
-- cheap
-- explicitly bounded
+Document the future composition, without implementing it here:
 
-The real smoke test must prove that:
-- the router selected the model/effort
-- `codex exec` actually launched
-- the child returned
-- the router produced the execution summary
+    task/planner -> router -> routing JSON -> executor -> validator/outcome collector -> history/stats
 
-Do not use Astra for the smoke test.
+Graph inspection, learning, and orchestration are separate components around this contract.
 
-If running a real Codex child would consume an unreasonable remaining quota, report that and stop after the mocked integration tests instead of burning the quota.
+## Non-goals
+
+Do not build executor, prompt input, decomposition, Graphify, stats aggregation, learning, quota accounting, orchestration, parallel workers, or change GPT-6 policy.
 
 ## Validation
 
 Run:
 
-```bash
-python3 -m unittest discover -s .agents/skills/codex-model-router/tests -v
-python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
-git diff --check
-```
+    python3 -m unittest discover -s .agents/skills/codex-model-router/tests -v
+    python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
+    git diff --check
 
-Compile any new Python module under `scripts/`.
+Also prove no router production module imports or invokes `subprocess`.
 
 ## Commit
 
 Commit exactly:
 
-```
-feat: execute routed Codex tasks
-```
+    refactor: keep router decision-only
 
 Push normally to `dev`. Never force-push.
 
-Then STOP and report:
-- files changed
-- run-task CLI
-- routing decision used in tests
-- mocked integration results
-- real smoke-test result, if executed
-- outcome-recording behavior
-- tests/checks
-- commit SHA
-- push result
+Then STOP and report files changed, removed execution behavior, route-task interface, routing JSON examples, history read/write boundary, proof of no subprocess execution, tests/checks, commit SHA, and push result.
