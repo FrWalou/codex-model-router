@@ -828,6 +828,203 @@ python3 -m unittest
 """)
                 self.assertEqual(result["failcost"], "high")
 
+    def test_classifier_ignores_sensitive_terms_in_meta_sections(self):
+        result = self.advisor.classify_task_text("""# Refine task classification
+## Objective
+Correct semantic section scoping in the local advisor.
+## Signals
+security auth tenant migration concurrency architecture
+## Tests
+Examples must cover auth, tenant migration, and concurrency architecture.
+## Non-goals
+Do not change security or tenant isolation.
+## Required behavior
+Preserve deterministic behavior.
+- src/advisor.py
+## Validation
+python3 -m unittest
+""")
+        self.assertNotEqual(result["task_family"], "security-sensitive-change")
+        self.assertNotEqual(result["failcost"], "high")
+        self.assertNotIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_ignores_non_goals_sensitive_terms(self):
+        result = self.advisor.classify_task_text("""# Refine advisor
+## Required behavior
+Keep the change bounded.
+- src/advisor.py
+## Non-goals
+Do not touch auth or tenant isolation.
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "mid")
+        self.assertNotIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_does_not_infer_acceptance_from_meta_sections(self):
+        result = self.advisor.classify_task_text("""# Refine advisor validation
+## Tests
+The implementation must cover every branch.
+## Non-goals
+### Acceptance
+This is only an example of an excluded heading.
+## Allowed paths
+- src/advisor.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["verifiable"], "partial")
+        self.assertIn("acceptance-ambiguous", result["reasons"])
+
+    def test_classifier_excludes_top_level_non_goals_and_nested_acceptance(self):
+        result = self.advisor.classify_task_text("""# Non-goals
+Do not touch auth or tenant isolation.
+## Acceptance
+This is only an excluded example.
+# Objective
+Rename one local helper.
+# Allowed paths
+- src/helper.py
+# Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["task_family"], "bounded-implementation")
+        self.assertEqual(result["failcost"], "mid")
+        self.assertEqual(result["verifiable"], "partial")
+        self.assertIn("acceptance-ambiguous", result["reasons"])
+        self.assertNotIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_preserves_real_work_mixed_with_axis_metadata(self):
+        for behavior in (
+            "Implement auth enforcement for tenant isolation and retain failcost metadata.",
+            "auth => failcost high\nImplement auth enforcement for tenant isolation.",
+            "Implement auth enforcement for tenant isolation.\nRetain failcost metadata.",
+        ):
+            with self.subTest(behavior=behavior):
+                result = self.advisor.classify_task_text(f"""# Update helper
+## Required behavior
+{behavior}
+## Allowed paths
+- src/helper.py
+## Validation
+python3 -m unittest
+""")
+                self.assertEqual(result["task_family"], "security-sensitive-change")
+                self.assertEqual(result["failcost"], "high")
+                self.assertEqual(result["verifiable"], "yes")
+                self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_preserves_generic_rules_titles(self):
+        result = self.advisor.classify_task_text("""# Update authentication rules
+## Objective
+Implement auth enforcement for tenant isolation.
+## Required behavior
+Reject unauthorized access.
+## Allowed paths
+- src/helper.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "high")
+        self.assertEqual(result["verifiable"], "yes")
+        self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_preserves_real_work_before_same_line_axis_mapping(self):
+        result = self.advisor.classify_task_text("""# Update helper
+## Required behavior
+Implement auth enforcement for tenant isolation; preserve classifier mapping auth => failcost high.
+## Allowed paths
+- src/helper.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "high")
+        self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_ignores_headings_inside_fenced_examples(self):
+        result = self.advisor.classify_task_text("""# Update helper
+## Required behavior
+Rename one local helper.
+## Examples
+```markdown
+## Objective
+Implement auth enforcement for tenant isolation.
+```
+## Allowed paths
+- src/helper.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "mid")
+        self.assertNotIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_recognizes_closed_execution_headings(self):
+        result = self.advisor.classify_task_text("""# Update helper
+## Required behavior ##
+Implement auth enforcement for tenant isolation.
+## Allowed paths
+- src/helper.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "high")
+        self.assertEqual(result["verifiable"], "yes")
+        self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_real_required_security_still_has_high_failcost(self):
+        result = self.advisor.classify_task_text("""# Protect accounts
+## Required behavior
+Enforce auth security and tenant isolation.
+- src/auth.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "high")
+        self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_requirements_are_execution_and_acceptance_evidence(self):
+        result = self.advisor.classify_task_text("""# Protect accounts
+## Requirements
+Enforce auth and tenant isolation.
+- src/accounts.py
+## Validation
+python3 -m unittest
+""")
+        self.assertEqual(result["failcost"], "high")
+        self.assertEqual(result["verifiable"], "yes")
+        self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_preserves_execution_arrows_and_classifier_terms(self):
+        arrow = self.advisor.classify_task_text("""# Protect accounts
+## Required behavior
+- auth => tenant isolation
+- src/accounts.py
+## Validation
+python3 -m unittest
+""")
+        classifier = self.advisor.classify_task_text("""# Protect accounts
+## Required behavior
+Implement an auth classifier for tenant access.
+- src/accounts.py
+## Validation
+python3 -m unittest
+""")
+        for result in (arrow, classifier):
+            self.assertEqual(result["failcost"], "high")
+            self.assertIn("sensitive-change-floor", result["reasons"])
+
+    def test_classifier_does_not_treat_path_bullets_as_semantic_risk(self):
+        result = self.advisor.classify_task_text("""# Rename helper
+## Required behavior
+Rename one local helper.
+- src/auth.py
+## Validation
+python3 -m unittest
+""")
+        self.assertNotEqual(result["task_family"], "security-sensitive-change")
+        self.assertEqual(result["failcost"], "mid")
+        self.assertNotIn("sensitive-change-floor", result["reasons"])
+
     def test_classifier_concurrency_has_medium_depth_floor(self):
         result = self.advisor.classify_task_text("""# Docs
 ## Required behavior
@@ -837,6 +1034,17 @@ race invariant
 python3 -m unittest
 """)
         self.assertIn(result["depth"], {"medium", "deep"})
+
+    def test_classifier_real_required_concurrency_keeps_depth_floor(self):
+        result = self.advisor.classify_task_text("""# Update scheduler
+## Required behavior
+Prevent a race across concurrent workers while preserving the invariant.
+- docs/scheduler.md
+## Validation
+python3 -m unittest
+""")
+        self.assertIn(result["depth"], {"medium", "deep"})
+        self.assertIn("concurrency-depth-floor", result["reasons"])
 
     def test_classifier_without_validation_is_not_fully_verifiable(self):
         result = self.advisor.classify_task_text("""# Change
@@ -1079,6 +1287,38 @@ python3 -m unittest
         self.assertIn(result["failcost"], {"mid", "high"})
         self.assertIn(result["depth"], {"medium", "deep"})
         self.assertNotEqual(result["verifiable"], "yes")
+
+    def test_classifier_current_r002_card_scopes_meta_signals(self):
+        result = self.advisor.classify_task_text("""# R0.02 — Deterministic task classification
+## Objective
+Fix semantic section scoping in the deterministic classifier.
+## Required behavior
+### Section-aware semantic classification
+Semantic failcost/depth signals must come from execution-relevant content.
+### Safety preservation
+- auth, credential, tenant, privacy, security => failcost high
+- destructive migration or remediation => failcost high
+- race, concurrency, distributed invariants => depth at least medium
+- architecture and cross-cutting signals => architecture depth floor
+## Allowed paths
+- .agents/skills/codex-model-router/scripts/advisor.py
+- .agents/skills/codex-model-router/tests/test_advisor.py
+- .agents/skills/codex-model-router/SKILL.md
+- .agents/skills/codex-model-router/README.md
+## Regression tests
+Examples mention security, auth, tenant, migration, concurrency, and architecture.
+## Non-goals
+Do not integrate external security tooling.
+## Validation
+python3 -m unittest discover -s .agents/skills/codex-model-router/tests -v
+""")
+        self.assertNotEqual(result["task_family"], "security-sensitive-change")
+        self.assertNotEqual(result["task_family"], "concurrency-change")
+        self.assertNotEqual(result["failcost"], "high")
+        self.assertEqual(result["verifiable"], "yes")
+        self.assertIn("deterministic-validation", result["reasons"])
+        self.assertIn("mutable-path-spread", result["reasons"])
+        self.assertNotIn("concurrency-depth-floor", result["reasons"])
 
     def test_classifier_is_deterministic_and_reasons_do_not_echo_task_prose(self):
         task = """# Change

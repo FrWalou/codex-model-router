@@ -119,6 +119,144 @@ def _contains_any(text: str, signals: tuple[str, ...]) -> bool:
     return any(re.search(r"\b" + re.escape(signal) + r"\b", text) for signal in signals)
 
 
+def _semantic_task_scope(task_text: str) -> tuple[str, bool]:
+    """Return execution-relevant prose and explicit acceptance evidence.
+
+    Markdown headings provide the semantic boundary. Validation, paths, and
+    workstreams are intentionally handled by their dedicated parsers instead.
+    """
+    sections: list[dict[str, Any]] = []
+    stack: list[tuple[int, str]] = []
+    current: dict[str, Any] | None = None
+    fence_marker: str | None = None
+    for line in task_text.splitlines():
+        fence = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence:
+            marker = fence.group(1)[0]
+            fence_marker = None if fence_marker == marker else marker
+            continue
+        if fence_marker:
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            title = heading.group(2).strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            current = {
+                "level": level,
+                "title": title,
+                "parents": tuple(stack),
+                "lines": [],
+            }
+            sections.append(current)
+            stack.append((level, title))
+        elif current is not None:
+            current["lines"].append(line)
+
+    if not sections:
+        return task_text, False
+
+    def normalized(value: str) -> str:
+        value = re.sub(r"[`*_]", "", value.lower())
+        return re.sub(r"\s+", " ", value).strip(" :-")
+
+    def is_execution_heading(value: str) -> bool:
+        name = normalized(value)
+        return any(
+            name == candidate or name.startswith(candidate + ":")
+            for candidate in (
+                "objective",
+                "required behavior",
+                "acceptance",
+                "acceptance criteria",
+                "implementation",
+                "implementation requirements",
+                "requirements",
+                "scope",
+                "scope requirements",
+            )
+        )
+
+    def is_acceptance_heading(value: str) -> bool:
+        name = normalized(value)
+        return name in {
+            "required behavior",
+            "requirements",
+            "acceptance",
+            "acceptance criteria",
+        }
+
+    def is_excluded_heading(value: str) -> bool:
+        name = normalized(value)
+        return bool(
+            re.search(r"\b(?:tests?|validation|checks?|non[- ]goals?|examples?)\b", name)
+            or re.fullmatch(r"(?:classifier\s+)?signals?(?:\s+documentation)?", name)
+            or re.fullmatch(r"classifier\s+rules?(?:\s+documentation)?", name)
+            or re.search(r"\b(?:completion|reporting?|commit)\b", name)
+            or re.search(r"\b(?:allowed|mutable)\s+paths?\b", name)
+            or re.search(r"\bworkstreams?\b", name)
+        )
+
+    def semantic_rule_text(value: str) -> str:
+        """Remove an explicit axis mapping while retaining genuine work prose."""
+        line = normalized(value)
+        mapping = re.search(
+            r"=>[^\n]*(?:failcost|depth(?:\s+(?:floor|at least))?|architecture depth)",
+            line,
+        )
+        if not mapping:
+            return value
+        prefix = value.split("=>", 1)[0]
+        if prefix.lstrip().startswith(("-", "*")):
+            return ""
+        if ";" in prefix:
+            prefix = prefix.rsplit(";", 1)[0]
+        if re.search(
+            r"\b(?:implement|enforce|protect|prevent|add|update|change|fix|preserve|retain|require)\b",
+            prefix,
+            flags=re.IGNORECASE,
+        ):
+            return prefix
+        return ""
+
+    def is_meta_label_or_path(value: str) -> bool:
+        line = normalized(value)
+        if re.match(
+            r"^(?:tests?|validation|checks?|non[- ]goals?|examples?|signals?|"
+            r"completion|reporting?|commit)\s*:",
+            line,
+        ):
+            return True
+        return bool(re.match(r"^\s*-\s+`?[^`\s]+`?\s*$", value)) and (
+            "/" in value or "." in value
+        )
+
+    acceptance = any(
+        is_acceptance_heading(section["title"])
+        and not any(
+            is_excluded_heading(title)
+            for level, title in section["parents"]
+        )
+        for section in sections
+    )
+    semantic_lines: list[str] = []
+    for section in sections:
+        ancestry = (*section["parents"], (section["level"], section["title"]))
+        if any(is_excluded_heading(title) for level, title in ancestry):
+            continue
+        selected = section["level"] == 1 or any(
+            is_execution_heading(title) for _, title in ancestry
+        )
+        if not selected:
+            continue
+        for candidate in [section["title"], *section["lines"]]:
+            semantic_line = semantic_rule_text(candidate)
+            if semantic_line.strip() and not is_meta_label_or_path(semantic_line):
+                semantic_lines.append(semantic_line)
+    return "\n".join(semantic_lines), acceptance
+
+
 def _has_validation_evidence(task_text: str) -> bool:
     """Prefer an executable-looking validation section over prose mentions."""
     sections: dict[str, list[str]] = {"validation": [], "test": [], "check": []}
@@ -287,13 +425,13 @@ def classify_task_text(task_text: str) -> dict[str, Any]:
     """
     if not isinstance(task_text, str) or not task_text.strip():
         raise ValueError("task text must be a non-empty string")
-    text = task_text.lower()
+    semantic_text, acceptance = _semantic_task_scope(task_text)
+    text = semantic_text.lower()
     reasons: list[str] = []
     paths = _task_card_paths(task_text)
     path_roots = {path.split("/", 1)[0] for path in paths}
 
     validation = _has_validation_evidence(task_text)
-    acceptance = _contains_any(text, ("required behavior", "acceptance criteria", "acceptance", "must"))
     sensitive = _contains_any(
         text,
         (
