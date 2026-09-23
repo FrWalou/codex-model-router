@@ -385,42 +385,7 @@ class AdvisorRegistryTests(unittest.TestCase):
     def setUpClass(cls):
         cls.advisor = load_advisor()
 
-    def test_verified_pass_requires_verification_evidence(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            with self.assertRaisesRegex(ValueError, "verification evidence"):
-                self.advisor.append_record(
-                    path,
-                    {
-                        "task_family": "structured-extraction",
-                        "axes": {"verifiable": "yes"},
-                        "model": "gpt-5.6-luna",
-                        "effort": "medium",
-                        "outcome": "verified_pass",
-                        "model_version": "gpt-5.6",
-                        "policy_version": "2026-07-15.v1",
-                        "session_id": "task-123",
-                    },
-                )
 
-    def test_registry_does_not_store_raw_prompt_content(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            with self.assertRaisesRegex(ValueError, "unsupported record fields"):
-                self.advisor.append_record(
-                    path,
-                    {
-                        "task_family": "structured-extraction",
-                        "raw_prompt": "Client Alpha confidential ledger",
-                        "axes": {"verifiable": "yes"},
-                        "model": "gpt-5.6-luna",
-                        "effort": "medium",
-                        "outcome": "partial",
-                        "model_version": "gpt-5.6",
-                        "policy_version": "2026-07-15.v1",
-                        "session_id": "task-123",
-                    },
-                )
 
     def test_query_excludes_stale_and_other_model_generation_records(self):
         now = datetime(2026, 7, 15, tzinfo=timezone.utc)
@@ -608,85 +573,9 @@ class AdvisorRegistryTests(unittest.TestCase):
                 )
                 self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
 
-    def test_astra_outcome_can_be_recorded(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            saved = self.advisor.append_record(
-                path,
-                {
-                    "task_family": "architecture-migration",
-                    "axes": {"verifiable": "partial"},
-                    "model": "gpt-6-astra",
-                    "effort": "low",
-                    "outcome": "verified_pass",
-                    "verification_command": "python3 -m unittest",
-                    "verification_result": "pass",
-                    "model_version": "gpt-6",
-                    "policy_version": "2026-09-22.v3",
-                    "session_id": "worker-456",
-                    "phase": "qa",
-                    "agent_name": "pas_astra_low_worker",
-                    "dispatch_mode": "native_custom_agent",
-                },
-            )
 
-        self.assertEqual((saved["model"], saved["effort"]), ("gpt-6-astra", "low"))
 
-    def test_every_locally_supported_gpt_6_manual_effort_can_be_recorded(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            for model in ("gpt-6-luna", "gpt-6-sol", "gpt-6-astra"):
-                efforts = self.advisor.MODEL_EFFORTS[model]
-                for effort in efforts:
-                    with self.subTest(model=model, effort=effort):
-                        saved = self.advisor.append_record(
-                            path,
-                            {
-                                "task_family": "manual-routing",
-                                "axes": {"verifiable": "partial"},
-                                "model": model,
-                                "effort": effort,
-                                "outcome": "partial",
-                                "model_version": "gpt-6",
-                                "policy_version": "2026-09-23.v4",
-                                "session_id": "worker-456",
-                            },
-                        )
-                        self.assertEqual((saved["model"], saved["effort"]), (model, effort))
 
-    def test_locally_unsupported_gpt_6_effort_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaisesRegex(ValueError, "unsupported effort"):
-                self.advisor.append_record(
-                    Path(temp_dir) / "outcomes.jsonl",
-                    {
-                        "task_family": "manual-routing",
-                        "axes": {"verifiable": "partial"},
-                        "model": "gpt-6-luna",
-                        "effort": "ultra",
-                        "outcome": "partial",
-                        "model_version": "gpt-6",
-                        "policy_version": "2026-09-23.v4",
-                        "session_id": "worker-456",
-                    },
-                )
-
-    def test_astra_record_rejects_mismatched_model_generation(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with self.assertRaisesRegex(ValueError, "does not match model"):
-                self.advisor.append_record(
-                    Path(temp_dir) / "outcomes.jsonl",
-                    {
-                        "task_family": "architecture-migration",
-                        "axes": {"verifiable": "partial"},
-                        "model": "gpt-6-astra",
-                        "effort": "low",
-                        "outcome": "partial",
-                        "model_version": "gpt-5.6",
-                        "policy_version": "2026-09-22.v3",
-                        "session_id": "worker-456",
-                    },
-                )
 
     def test_gpt_5_6_passes_do_not_override_a_gpt_6_recommendation(self):
         recommendation = {
@@ -731,25 +620,6 @@ class AdvisorRegistryTests(unittest.TestCase):
         self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
         self.assertEqual(result["history_basis"], "no stable verified-history override")
 
-    def test_xhigh_does_not_expand_legacy_model_efforts(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
-                with self.subTest(model=model), self.assertRaisesRegex(
-                    ValueError, "unsupported effort"
-                ):
-                    self.advisor.append_record(
-                        Path(temp_dir) / "outcomes.jsonl",
-                        {
-                            "task_family": "legacy-compatibility",
-                            "axes": {"verifiable": "yes"},
-                            "model": model,
-                            "effort": "xhigh",
-                            "outcome": "partial",
-                            "model_version": "gpt-5.6",
-                            "policy_version": "2026-09-22.v3",
-                            "session_id": "worker-456",
-                        },
-                    )
 
     def test_unregistered_model_effort_history_never_overrides_policy(self):
         recommendation = {
@@ -896,118 +766,9 @@ class AdvisorRegistryTests(unittest.TestCase):
         self.assertFalse(result["codex_exec_ready"])
         self.assertIsNone(result["fallback_command"])
 
-    def test_successful_record_contains_only_controlled_fields(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            saved = self.advisor.append_record(
-                path,
-                {
-                    "task_family": "structured-extraction",
-                    "axes": {"verifiable": "yes"},
-                    "model": "gpt-5.6-luna",
-                    "effort": "medium",
-                    "outcome": "verified_pass",
-                    "verification_command": "pytest -q",
-                    "verification_result": "12 passed",
-                    "model_version": "gpt-5.6",
-                    "policy_version": "2026-07-15.v1",
-                    "session_id": "thread-456",
-                },
-                now=datetime(2026, 7, 15, tzinfo=timezone.utc),
-            )
 
-            persisted = json.loads(path.read_text())
 
-        self.assertEqual(saved, persisted)
-        self.assertNotIn("raw_prompt", persisted)
-        self.assertEqual(persisted["verification_result"], "12 passed")
 
-    def test_historical_gpt_5_6_external_record_shape_remains_valid(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            saved = self.advisor.append_record(
-                path,
-                {
-                    "task_family": "feature-build",
-                    "axes": {"verifiable": "yes"},
-                    "model": "gpt-5.6-terra",
-                    "effort": "high",
-                    "outcome": "verified_pass",
-                    "verification_command": "pytest -q",
-                    "verification_result": "20 passed",
-                    "model_version": "gpt-5.6",
-                    "policy_version": "2026-07-15.v2",
-                    "session_id": "worker-123",
-                    "phase": "build",
-                    "agent_name": "pas_terra_builder",
-                    "dispatch_mode": "native_custom_agent",
-                },
-            )
-
-        self.assertEqual(saved["phase"], "build")
-        self.assertEqual(saved["agent_name"], "pas_terra_builder")
-        self.assertEqual(saved["dispatch_mode"], "native_custom_agent")
-
-    def test_record_rejects_unknown_dispatch_mode(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            with self.assertRaisesRegex(ValueError, "dispatch mode"):
-                self.advisor.append_record(
-                    path,
-                    {
-                        "task_family": "feature-build",
-                        "axes": {"verifiable": "yes"},
-                        "model": "gpt-5.6-terra",
-                        "effort": "high",
-                        "outcome": "partial",
-                        "model_version": "gpt-5.6",
-                        "policy_version": "2026-07-15.v2",
-                        "session_id": "worker-123",
-                        "phase": "build",
-                        "agent_name": "pas_terra_builder",
-                        "dispatch_mode": "pretend-native",
-                    },
-                )
-
-    def test_dispatched_record_requires_phase(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            with self.assertRaisesRegex(ValueError, "phase"):
-                self.advisor.append_record(
-                    path,
-                    {
-                        "task_family": "feature-build",
-                        "axes": {"verifiable": "yes"},
-                        "model": "gpt-5.6-terra",
-                        "effort": "high",
-                        "outcome": "partial",
-                        "model_version": "gpt-5.6",
-                        "policy_version": "2026-07-15.v2",
-                        "session_id": "worker-123",
-                        "agent_name": "pas_terra_builder",
-                        "dispatch_mode": "codex_exec",
-                    },
-                )
-
-    def test_external_worker_record_requires_agent_name(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "outcomes.jsonl"
-            with self.assertRaisesRegex(ValueError, "agent_name"):
-                self.advisor.append_record(
-                    path,
-                    {
-                        "task_family": "feature-build",
-                        "axes": {"verifiable": "yes"},
-                        "model": "gpt-5.6-terra",
-                        "effort": "high",
-                        "outcome": "partial",
-                        "model_version": "gpt-5.6",
-                        "policy_version": "2026-07-15.v2",
-                        "session_id": "worker-123",
-                        "phase": "build",
-                        "dispatch_mode": "native_custom_agent",
-                    },
-                )
 
 
 class AdvisorCliTests(unittest.TestCase):
@@ -1640,98 +1401,7 @@ python3 -m unittest
         self.assertEqual(payload["model"], "gpt-6-luna")
         self.assertEqual(payload["history_basis"], "no stable verified-history override")
 
-    def test_record_and_query_commands_round_trip_controlled_data(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            registry = Path(temp_dir) / "outcomes.jsonl"
-            record = subprocess.run(
-                [
-                    sys.executable,
-                    str(MODULE_PATH),
-                    "--registry",
-                    str(registry),
-                    "record",
-                    "--task-family",
-                    "structured-extraction",
-                    "--axes-json",
-                    '{"verifiable":"yes"}',
-                    "--model",
-                    "gpt-5.6-luna",
-                    "--effort",
-                    "medium",
-                    "--outcome",
-                    "verified_pass",
-                    "--verification-command",
-                    "pytest -q",
-                    "--verification-result",
-                    "13 passed",
-                    "--session-id",
-                    "thread-456",
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            query = subprocess.run(
-                [
-                    sys.executable,
-                    str(MODULE_PATH),
-                    "--registry",
-                    str(registry),
-                    "query",
-                    "--task-family",
-                    "structured-extraction",
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
 
-        self.assertEqual(record.returncode, 0, record.stderr)
-        self.assertEqual(query.returncode, 0, query.stderr)
-        self.assertEqual(len(json.loads(query.stdout)), 1)
-        self.assertEqual(json.loads(record.stdout)["session_id"], "thread-456")
-
-    def test_record_command_accepts_actual_dispatch_fields(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            registry = Path(temp_dir) / "outcomes.jsonl"
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(MODULE_PATH),
-                    "--registry",
-                    str(registry),
-                    "record",
-                    "--task-family",
-                    "feature-build",
-                    "--axes-json",
-                    '{"verifiable":"yes"}',
-                    "--model",
-                    "gpt-5.6-terra",
-                    "--effort",
-                    "high",
-                    "--outcome",
-                    "verified_pass",
-                    "--verification-command",
-                    "pytest -q",
-                    "--verification-result",
-                    "24 passed",
-                    "--phase",
-                    "build",
-                    "--agent-name",
-                    "pas_terra_builder",
-                    "--dispatch-mode",
-                    "native_custom_agent",
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["phase"], "build")
-        self.assertEqual(payload["agent_name"], "pas_terra_builder")
-        self.assertEqual(payload["dispatch_mode"], "native_custom_agent")
 
     def test_session_command_reports_runtime_identity(self):
         env = dict(os.environ)

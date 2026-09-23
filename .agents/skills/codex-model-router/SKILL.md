@@ -1,58 +1,30 @@
 ---
 name: codex-model-router
-description: Use when a Codex task needs an explicit GPT-6 Luna, Sol, or Astra model and reasoning-effort choice, spans planning, implementation, testing, or QA phases, should delegate work automatically by difficulty or volume, or needs evidence-based escalation from a prior model choice.
+description: Use when a Codex task needs an explicit GPT-6 Luna, Sol, or Astra model and reasoning-effort choice, spans planning, implementation, testing, or QA phases, or needs evidence-based escalation from a prior model choice.
 ---
 
 # Codex Model Router
 
 ## Purpose
 
-Keep one visible coordinator conversation while routing bounded work to the smallest capable worker. GPT-6 Astra is a final evidence-gated escalation tier, not a default. Do not claim the active task changed models; prove which worker actually ran.
+codex-model-router = routing decision engine only. It classifies a bounded task descriptor and returns model, effort, exact registered worker, and bounded escalation metadata. It does not execute a worker, inspect Git, validate results, or write outcomes. Do not claim the active task changed models or that a recommendation proves execution.
 
-## Classify each substantial phase
+## Route one task
 
-Assign a non-sensitive hyphen-case `task_family`, a `phase` (`plan`, `build`, `test`, `qa`), and:
+For a structured task card, run `scripts/advisor.py route-task --task-file PATH --phase build`. This reads the card, uses the deterministic R0.02 classifier, applies the GPT-6 policy and eligible read-only history, and emits schema-versioned JSON. It never echoes raw task prose. Use `classify` or `recommend-from-task` for narrower inspection, or `recommend` for explicit-axis compatibility.
 
-- `verifiable`: `yes`, `partial`, `no`
-- `failcost`: `low`, `mid`, `high`
-- `volume`: `low`, `mid`, `high`
-- `depth`: `shallow`, `medium`, `deep`
-- `decomposable`: `yes` only for independently verifiable workstreams
-- `workstreams`: independent workstream count
+The axes are `verifiable` (yes/partial/no), `failcost` (low/mid/high), `volume` (low/mid/high), `depth` (shallow/medium/deep), `decomposable` (yes/no), and independent `workstreams` count. A phase is `plan`, `build`, `test`, or `qa`. Route from these axes, not the phase name alone. Never infer a task from the globally newest rollout.
 
-For a supplied structured task card, first run `scripts/advisor.py classify --task-file PATH`. The local classifier returns conservative axes, confidence, and non-sensitive signal labels without calling a model. Use `recommend-from-task` or `dispatch-from-task` to pass those axes to the advisor without retyping them. Otherwise run `scripts/advisor.py dispatch --help`, then call `dispatch` with explicit axes and `task_scope` (`micro`, `phase`, `workflow`).
+## Decision boundary
 
-For a single already-bounded card, `scripts/advisor.py run-task --task-file PATH --phase build --parent-sandbox MODE --exec-sandbox MODE --parent-approval-policy POLICY --approval-boundary-confirmed` can launch one `codex exec` worker. It requires an explicit `Allowed paths` section, a registered exact worker mapping, and a safe confirmed boundary. Inspect the JSON summary and actual diff before integration; reported out-of-scope paths are rejected without rollback. It does not accept raw prompts or split tasks.
+`route-task` returns `schema_version`, `task_family`, `classification`, `phase`, `model`, `effort`, `model_version`, `policy_version`, `rule_id`, `agent_name`, `automatic`, `next_escalation`, `reason_labels`, and `dispatch_capability`. Capability metadata is not a launch. Existing `dispatch` and `dispatch-from-task` remain advisory compatibility interfaces; their `fallback_command` is a proposal, never executed by the router.
 
-## Execute the dispatch
+The exact automatic chain is Luna Medium → Sol Medium → Sol High → Astra Low → Astra Medium → Astra High → blocked. Astra is not statically selected. xhigh, max, and ultra remain manual-only. A verified failure of the current exact pair is required before advancing. GPT-5.6 records remain readable but cannot alter a GPT-6 decision. Verified history overrides require the same task family, axes, phase, and generation, an exact automatic worker mapping, two recent verified passes, and no verified failure.
 
-Use this ordered contract:
+## Composition outside the router
 
-1. If `task_scope=micro`, keep it in the main task and report `dispatch_mode=main_task_direct`.
-2. Otherwise, spawn the returned `agent_name` only when `native_custom_agent_ready=true` and the runtime preserves the parent boundary. Its fixed model and effort exactly match the recommendation. Report `dispatch_mode=native_custom_agent`.
-3. If native selection is unavailable, identify the parent sandbox and approval policy. Request the same or stricter child sandbox, pass the exact parent approval policy, and explicitly confirm the boundary when calling `dispatch`. Run the bounded `codex exec` command only when `codex_exec_ready=true`; it pins that policy explicitly. Include exact cwd, mutable paths, acceptance criteria, and `--json`. Report `dispatch_mode=codex_exec`.
-4. If neither mechanism is available, continue in the main task and report `dispatch_mode=main_task_fallback` plus the capability gap.
+task/planner → router → routing JSON → executor → validator/outcome collector → history/stats
 
-Run write-dependent phases sequentially. Parallelize only independent read-heavy work. Use a fresh worker for independent QA when it materially improves confidence.
+A separate executor chooses how to use `pas_luna_worker`, `pas_sol_worker`, `pas_sol_analyst`, or a bounded Astra worker. `pas_sol_max_worker` is explicit/manual-only. That executor—not this router—must preserve the parent's approval policy, use the same or stricter sandbox, respect mutable paths, and report the actual `dispatch_mode` (`native_custom_agent`, `codex_exec`, `main_task_direct`, or `main_task_fallback`). If `task_scope=micro`, an external coordinator may keep it in the main task. `codex_exec_ready` is advisory boundary metadata, not evidence that Codex ran. Reject the worker result as out-of-scope before integration if changed paths exceed the task boundary.
 
-After every worker returns, compare its reported changed paths and the actual diff with the allowed mutable paths. Reject the worker result as an out-of-scope violation before integration or recording if any path exceeds that boundary.
-
-The project agents are:
-
-- `pas_luna_worker`: repeatable, validator-backed, high-volume, or deterministic test work
-- `pas_sol_worker`: normal Sol Medium implementation, integration, and analysis
-- `pas_sol_analyst`: architecture, ambiguous high-failure-cost work, and independent high-risk QA
-- `pas_sol_max_worker`: explicit/manual-only Sol Max work
-- `pas_astra_low_worker`: first bounded Astra escalation after a named Sol High failure
-- `pas_astra_medium_worker`: bounded Astra escalation after an Astra Low failure
-- `pas_astra_high_worker`: bounded Astra escalation after named lower-tier failures
-
-Route from the axes, not the phase name alone. The automatic chain is Luna Medium → Sol Medium → Sol High → Astra Low → Astra Medium → Astra High → blocked. Astra is never statically selected. The local Codex catalog supplies each model's accepted efforts; xhigh, max, and ultra remain explicit/manual-only and never enter automatic routing or history overrides. Historical GPT-5.6 records remain readable but cannot alter GPT-6 recommendations.
-
-## Escalate and record
-
-Escalate only after a named check fails. Attach the failure evidence to the next worker; the history policy must move away from the failed model/effort combination. Stop when the escalation chain is exhausted or the same failure repeats without new information.
-
-After verification, use `record` with the actual `model`, `effort`, `phase`, `agent_name`, `dispatch_mode`, command, and result. Never record raw prompts, customer names, source text, credentials, or confidential data. A history override requires a registered exact model-effort agent, two recent verified passes, no verified failure, the same axes, and the same model generation; Max and Ultra never qualify.
-
-Accept session identity only from runtime environment variables; otherwise use `unknown`. Never infer the current task from the globally newest rollout. Verified history may record Astra outcomes, but history overrides require an exact registered worker and never select Astra xhigh/max.
+The separate validator/outcome collector owns verification and outcome writing. The router only consumes previously produced history. Graph inspection, learning, decomposition, and orchestration are separate components; this skill does not implement them.

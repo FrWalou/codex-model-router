@@ -4,320 +4,88 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
 
-Codex Model Router is a repository-scoped skill and custom-agent package for using GPT-6 Luna, Sol, and Astra intentionally inside one visible Codex conversation.
+codex-model-router = routing decision engine only. It reads a bounded task card, classifies it locally, applies GPT-6 policy and eligible read-only history, then returns routing JSON. It never launches Codex, runs tests, inspects Git, writes outcomes, or changes the active conversation model.
 
-The main conversation stays in control of requirements, approvals, and final integration. Bounded planning, implementation, test, and QA slices can be delegated automatically to model-specific workers. The router does not silently switch the model of the active conversation.
+## Composition
 
-## Why this exists
-
-Picking one expensive model for an entire coding task is simple but wasteful. Picking a cheaper model for everything is fast until the task needs architectural judgment or high-risk review. This package separates orchestration from execution:
-
-- GPT-6 Sol Medium handles everyday implementation, integration, and analysis; Sol High handles deep architecture, ambiguity, and high-failure-cost QA.
-- GPT-6 Luna Medium handles repeatable, validator-backed, high-volume, and deterministic test work.
-- GPT-6 Astra is a final, evidence-gated escalation tier for genuinely difficult or high-consequence work after Sol.
-
-The choice is not made from phase names alone. A difficult test investigation may need Sol; a mechanical planning inventory may need Luna. The deterministic advisor considers verifiability, failure cost, volume, depth, decomposability, and verified historical outcomes.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    U[User in one conversation] --> C[Main coordinator]
-    C --> R[Deterministic router]
-    R -->|Luna| L[pas_luna_worker]
-    R -->|Sol Medium| T[pas_sol_worker]
-    R -->|Sol High| S[pas_sol_analyst]
-    S -->|Named verification failure| A[pas_astra_low_worker]
-    L --> E[Verification evidence]
-    T --> E
-    S --> E
-    E --> C
-    C --> U
+```text
+task/planner -> router -> routing JSON -> executor -> validator/outcome collector -> history/stats
 ```
 
-The main coordinator keeps the conversation context. Workers receive bounded prompts with exact mutable paths, acceptance criteria, and verification commands. Their results return to the coordinator, which checks evidence before proceeding.
+The executor owns worker launch, sandbox and approval enforcement, mutable-path checks, and actual dispatch reporting. The validator/outcome collector owns verification and outcome writing. Graph inspection, learning, decomposition, and orchestration are separate components.
 
 ## Installation
 
-### Repository-scoped installation
-
-Copy the skill and project-agent directories into the target repository:
-
-```text
-your-repository/
-├── .agents/
-│   └── skills/
-│       └── codex-model-router/
-└── .codex/
-    └── agents/
-        ├── pas_luna_worker.toml
-        ├── pas_sol_worker.toml
-        ├── pas_sol_analyst.toml
-        ├── pas_sol_max_worker.toml
-        ├── pas_astra_low_worker.toml
-        ├── pas_astra_medium_worker.toml
-        └── pas_astra_high_worker.toml
-```
-
-From a checkout of this package:
+Copy the skill and the seven exact GPT-6 agent definitions into a repository:
 
 ```bash
 mkdir -p /path/to/your-repository/.agents/skills
 mkdir -p /path/to/your-repository/.codex/agents
-
-cp -R .agents/skills/codex-model-router \
-  /path/to/your-repository/.agents/skills/
-cp .codex/agents/pas_*.toml \
-  /path/to/your-repository/.codex/agents/
+cp -R .agents/skills/codex-model-router /path/to/your-repository/.agents/skills/
+cp .codex/agents/pas_*.toml /path/to/your-repository/.codex/agents/
 ```
 
-Start a new Codex task in the repository after installation so skill and custom-agent discovery reloads.
-
-### Personal installation
-
-For use across repositories, copy the skill to `${CODEX_HOME:-$HOME/.codex}/skills/codex-model-router`. Copy the agent TOML files to `${CODEX_HOME:-$HOME/.codex}/agents/`.
-
-Repository-scoped installation is recommended first. It keeps policy, custom workers, and outcome behavior reviewable with the codebase that uses them.
-
-### Requirements
-
-- A current Codex CLI or Codex application with GPT-6 Luna, Sol, and Astra available to the signed-in account.
-- Tested with Codex CLI `0.156.1`; newer releases should be revalidated when model slugs or custom-agent schema change.
-- Python 3.9 or newer for the advisor.
-- Native custom-agent support for the preferred dispatch path.
-- `codex exec` for the explicit fallback path.
-
-Check the local model catalog:
-
-```bash
-codex debug models
-```
+Repository-scoped installation is recommended. Python 3.9+ is required for the advisor. Check your Codex account's model catalog with `codex debug models`; the GPT-6 model slugs and efforts are runtime-dependent. The package was tested with Codex CLI `0.156.1`.
 
 ## Triggering the router
 
-Invoke it explicitly:
-
-```text
-Use $codex-model-router to plan, implement, test, and independently QA this change with suitable GPT-6 workers.
-```
-
-The skill metadata also allows implicit triggering when a substantial request needs deliberate model selection, automatic phase delegation, evidence-based escalation, or cost/quality balancing.
-
-For deterministic inspection without running a worker:
+Invoke `$codex-model-router` for a bounded model/effort choice, or use the CLI directly:
 
 ```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py dispatch \
-  --task-family feature-build \
-  --phase build \
-  --task-scope phase \
-  --verifiable yes \
-  --failcost mid \
-  --volume mid \
-  --depth deep \
-  --parent-sandbox workspace-write \
-  --exec-sandbox workspace-write \
-  --parent-approval-policy on-request \
-  --approval-boundary-confirmed
+python3 .agents/skills/codex-model-router/scripts/advisor.py route-task \
+  --task-file .github/CODEX_TASK.md --phase build
 ```
 
-For a structured task card, classify locally before recommending or dispatching. Classification reads only the supplied file, returns signal labels rather than task prose, and uses conservative floors when confidence is low:
+`route-task` is side-effect free. It reads the structured card and optional existing registry, but does not create a registry or execute the card. It does not accept raw-prompt input. Missing or malformed cards fail before a decision is emitted.
 
-```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py classify \
-  --task-file .github/CODEX_TASK.md
-python3 .agents/skills/codex-model-router/scripts/advisor.py dispatch-from-task \
-  --task-file .github/CODEX_TASK.md --phase build --task-scope phase
-```
+The JSON contract contains `schema_version`, `task_family`, `classification`, `phase`, `model`, `effort`, `model_version`, `policy_version`, `rule_id`, `agent_name` (or null), `automatic`, `next_escalation` (or null), `reason_labels`, and `dispatch_capability`. It never echoes task prose. `dispatch_capability` is advisory metadata, not proof of launch. Optional sandbox and approval flags can evaluate a proposed child boundary without executing it.
 
-`classify` does not choose a model or launch a worker. It derives the existing axes from validation evidence, sensitive-change and concurrency signals, allowed-path spread, and explicitly independent workstreams. The normal advisor remains the routing authority; existing explicit-axis `recommend` and `dispatch` commands remain supported.
-
-To execute one already-bounded card, use `run-task` with an explicit parent boundary:
-
-```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py run-task \
-  --task-file .github/CODEX_TASK.md --phase build \
-  --parent-sandbox workspace-write --exec-sandbox workspace-write \
-  --parent-approval-policy on-request --approval-boundary-confirmed
-```
-
-This launches exactly one `codex exec` child using the selected model and effort. The card must have an `Allowed paths` section; unsafe boundaries or missing exact worker mappings block launch. The JSON summary reports the child exit code, changed paths, verification evidence, and execution status. Reported out-of-scope paths are rejected without automatic rollback. Only explicit `passed` or `failed` verification evidence is recorded as verified; missing or ambiguous evidence is recorded as partial. Task prose is not stored in the outcome registry. `run-task` does not accept raw prompts or decompose work.
-
-The JSON result includes the model, effort, policy rule, custom-agent name, whether delegation is required, supported dispatch modes, and `codex_exec_ready`. The executable fallback command is withheld unless the parent sandbox and approval policy are explicit, the child sandbox is the same or stricter, and the coordinator confirms the boundary. It passes the exact parent approval policy to the child command instead of relying on user defaults.
+`classify`, `recommend-from-task`, `dispatch-from-task`, and explicit-axis `recommend`/`dispatch` remain available for compatibility. The legacy dispatch command may include a `fallback_command` suggestion; no router code executes it. `query` reads historical records.
 
 ## How automatic routing works
 
-For a typical multi-phase request, the coordinator repeats the following loop:
-
-1. Classify the next bounded phase.
-2. Run the deterministic `dispatch` command.
-3. For `task_scope=micro`, execute directly in the main task.
-4. Otherwise prefer the returned project custom agent.
-5. If native agent selection is unavailable, confirm the parent approval policy and request the same or stricter sandbox.
-6. Launch a bounded `codex exec` child only when `codex_exec_ready=true`.
-7. Compare the returned changed paths and actual diff with the allowed mutable paths; reject out-of-scope results.
-8. Collect commands, exit codes, verification evidence, and unresolved gaps.
-9. Record the actual execution after verification.
-
-Example outcome:
-
-```text
-Main conversation: coordinator (its active model does not change)
-Plan:             pas_sol_analyst / Sol high
-Build:            pas_sol_worker / Sol medium
-Tests:            pas_luna_worker / Luna medium
-Independent QA:   pas_sol_analyst / Sol high
-```
-
-The active conversation still reports its original model. Only the bounded child workers use different models.
-
-## Dispatch modes
-
-| Mode | Meaning |
-|---|---|
-| `native_custom_agent` | The current Codex surface launched a project agent whose fixed model and effort exactly match the recommendation. |
-| `codex_exec` | The coordinator launched an explicit headless child with `-m`, effort, the exact parent approval policy, and a confirmed same-or-stricter sandbox. |
-| `main_task_direct` | A micro task stayed in the main conversation because worker startup cost exceeded the benefit. |
-| `main_task_fallback` | No model-specific child mechanism was available; the coordinator continued and disclosed the gap. |
-
-Never report `native_custom_agent` merely because the policy recommended an agent. The dispatch mode describes what actually executed.
-
-## Routing axes
-
-| Axis | Values | Question |
+| Task shape | Static choice | Exact worker |
 |---|---|---|
-| `verifiable` | `yes`, `partial`, `no` | Can a deterministic check establish success? |
-| `failcost` | `low`, `mid`, `high` | What is the cost of a wrong result? |
-| `volume` | `low`, `mid`, `high` | Is this repeated or large-scale work? |
-| `depth` | `shallow`, `medium`, `deep` | How much cross-file or domain reasoning is required? |
-| `decomposable` | `yes`, `no` | Can workstreams be verified independently? |
-| `workstreams` | integer | How many independent workstreams exist? |
+| Clear repeatable or verifiable high-volume | GPT-6 Luna Medium | `pas_luna_worker` |
+| Balanced bounded implementation | GPT-6 Sol Medium | `pas_sol_worker` |
+| Judgment, complex build, or deep/high-risk | GPT-6 Sol High | `pas_sol_analyst` |
 
-`phase` and `task_scope` control execution shape. They do not replace the reasoning axes.
+The deterministic classifier uses verifiability, failure cost, volume, depth, decomposability, independent workstreams, validation evidence, and allowed-path spread. It returns stable signal labels, not task text. The exact automatic escalation chain is Luna Medium → Sol Medium → Sol High → Astra Low → Astra Medium → Astra High → blocked. Astra is never a static default. A verified failure of the exact current model/effort pair is required to advance. xhigh, max, and ultra are manual-only.
 
-## Evidence and outcome registry
+The selected `agent_name` is an exact registered mapping. The package also includes `pas_sol_max_worker` for explicit manual use and Astra Low/Medium/High workers for bounded escalation. A recommendation does not mean a worker ran.
 
-When the skill is inside a repository tree that contains `Harness/`, the default registry is:
+## History read boundary
 
-```text
-Harness/sink/model_effort_router/outcomes.jsonl
-```
+The router reads existing JSONL outcome records from `CODEX_MODEL_ROUTER_REGISTRY`, a repository ancestor's `Harness/sink/model_effort_router/outcomes.jsonl`, or `~/.codex/state/codex-model-router/outcomes.jsonl`. The router does not create or append this file. The standalone `record` command was removed; an external outcome collector must produce records.
 
-Without a `Harness/` ancestor, the fallback is `~/.codex/state/codex-model-router/outcomes.jsonl`. That location is shared across repositories. Public installs should set `CODEX_MODEL_ROUTER_REGISTRY` to a repository-local ignored path when cross-repository history is undesirable.
-
-Record a verified worker result:
-
-```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py record \
-  --task-family feature-build \
-  --axes-json '{"verifiable":"yes","failcost":"mid","volume":"mid","depth":"deep","decomposable":"no","workstreams":1}' \
-  --model gpt-6-sol \
-  --effort medium \
-  --phase build \
-  --agent-name pas_sol_worker \
-  --dispatch-mode native_custom_agent \
-  --outcome verified_pass \
-  --verification-command 'pytest -q' \
-  --verification-result '28 passed'
-```
-
-History overrides static policy only for a registered exact automatic model-effort agent when the same task family, axes, phase, and model generation have at least two recent verified passes and no verified failure. Historical GPT-5.6 records remain readable but cannot override or escalate GPT-6 recommendations. The local Codex catalog supports Luna low/medium/high/xhigh/max and Sol/Astra low/medium/high/xhigh/max/ultra. Catalog support permits recording and validation; xhigh, max, and ultra remain manual-only and cannot become automatic through history. A verified failure moves the next dispatch one step through the bounded escalation chain. Records older than the configured TTL are ignored.
-
-## Escalation
-
-Escalate from observed failure, not intuition:
-
-- Attach the failed command and result to the next worker.
-- Move one policy tier at a time.
-- Stop if the same failure repeats without new evidence.
-- Do not substitute higher reasoning effort for missing permissions, authority, requirements, or domain sources.
-
-The static policy selects GPT-6 Luna Medium or GPT-6 Sol Medium/High. Verified failure escalates Luna Medium → Sol Medium → Sol High → Astra Low → Astra Medium → Astra High → blocked. Astra is not a static default. xhigh, max, and ultra are never selected automatically.
+History overrides require matching task family, axes, phase, and model generation, plus two recent verified passes for an exact automatic worker mapping and no verified failure. Historical GPT-5.6 records remain readable but cannot change GPT-6 recommendations. Manual-only efforts never become automatic through history. The router still accepts locally cataloged GPT-6 efforts as metadata, while automatic choices stay within the chain above.
 
 ## Safety boundaries
 
-- The router does not silently switch the active conversation model.
-- Workers must honor exact mutable paths and preserve unrelated changes.
-- The coordinator rejects a worker result when its reported paths or actual diff exceed the allowed mutable paths.
-- A `codex exec` worker runs only after explicit boundary confirmation with a same-or-stricter sandbox and the exact parent approval policy.
-- The fallback command pins the supplied parent approval policy; it never silently substitutes a user-default child policy.
-- Write-dependent phases run sequentially.
-- Parallel writes to overlapping paths are prohibited.
-- A recommendation is not proof that a model executed.
-- The registry rejects unsupported field names such as `raw_prompt`, but it does not semantically detect secrets or personal data inside allowed text fields. Privacy is operator-enforced: use short, single-line, non-sensitive command/result summaries and never include client names, credentials, confidential text, or source documents.
-- Session identity comes only from runtime-provided environment variables; otherwise it is `unknown`.
-- The router never guesses the current task by scanning the globally newest rollout.
-- Commits, pushes, deployments, publishing, and external messages retain their normal approval requirements.
+- A routing decision is not authorization to execute, modify files, commit, or push.
+- The router never spawns a process or runs validation commands from the card.
+- Actual execution must preserve the parent approval policy and a same-or-stricter sandbox.
+- An external executor must enforce mutable paths and reject out-of-scope worker results.
+- A separate collector must keep raw prompts, credentials, and sensitive source text out of outcome records; privacy is operator-enforced.
+- The router never infers the current task from the globally newest rollout.
+- Missing authority or ambiguous product decisions cannot be repaired by model escalation.
 
 ## Limitations
 
-- Native model-specific custom-agent selection varies by Codex surface and version.
-- On surfaces without that capability, the package uses a separate `codex exec` child rather than changing the active task model.
-- Child workers have separate execution contexts even though the user remains in one visible coordinator conversation.
-- The router cannot repair missing authority or ambiguous product decisions.
-- Model availability and supported reasoning levels depend on the account and current model catalog.
-- This package does not include a scheduler, autonomous workflow engine, or recursive delegation controller.
+Model availability and custom-agent support depend on the Codex account and runtime. `codex_exec_ready` only states that supplied boundary metadata meets the advisor's checks; it does not assert that Codex is installed, available, or launched. This package has no executor, validator, stats aggregator, scheduler, Graphify integration, or learning engine.
 
 ## CLI reference
 
 ```bash
-python3 .agents/skills/codex-model-router/scripts/advisor.py --help
-python3 .agents/skills/codex-model-router/scripts/advisor.py dispatch --help
-python3 .agents/skills/codex-model-router/scripts/advisor.py record --help
+python3 .agents/skills/codex-model-router/scripts/advisor.py route-task --help
+python3 .agents/skills/codex-model-router/scripts/advisor.py classify --help
+python3 .agents/skills/codex-model-router/scripts/advisor.py recommend --help
 python3 .agents/skills/codex-model-router/scripts/advisor.py query --help
-python3 .agents/skills/codex-model-router/scripts/advisor.py session
 ```
 
 ## Testing
 
-Run the Python contract suite:
-
 ```bash
-python3 -m unittest discover \
-  -s .agents/skills/codex-model-router/tests \
-  -v
+python3 -m unittest discover -s .agents/skills/codex-model-router/tests -v
+python3 -m py_compile .agents/skills/codex-model-router/scripts/advisor.py
 ```
-
-Validate the skill metadata:
-
-```bash
-uv run --with pyyaml python \
-  "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" \
-  .agents/skills/codex-model-router
-```
-
-Validate agent TOML against the current model catalog with Python 3.12 `tomllib` and `codex debug models`. The repository's tests also check required safety language and public README sections.
-
-## Repository layout
-
-```text
-.agents/skills/codex-model-router/
-├── SKILL.md
-├── README.md
-├── agents/openai.yaml
-├── references/policy.json
-├── scripts/advisor.py
-└── tests/
-    ├── test_advisor.py
-    └── test_package_contract.py
-
-.codex/agents/
-├── pas_luna_worker.toml
-├── pas_sol_worker.toml
-├── pas_sol_analyst.toml
-├── pas_sol_max_worker.toml
-├── pas_astra_low_worker.toml
-├── pas_astra_medium_worker.toml
-└── pas_astra_high_worker.toml
-```
-
-## Release hygiene
-
-Before publishing a release:
-
-1. Preserve both `.agents/` and `.codex/` directory trees.
-2. Keep the MIT license and copyright notice with redistributed copies.
-3. Run the complete test and model-catalog validation commands.
-4. Remove local registries, session logs, and private Harness artifacts from the release.
-5. Document the minimum tested Codex CLI version and refresh it when model slugs or custom-agent schema change.
-
-This project is released under the [MIT License](LICENSE). Security issues should follow [SECURITY.md](SECURITY.md).

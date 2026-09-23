@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,13 +53,6 @@ AUTOMATIC_MODEL_EFFORTS = {
     ("gpt-6-astra", "medium"),
     ("gpt-6-astra", "high"),
 }
-VALID_OUTCOMES = {"verified_pass", "verified_fail", "partial"}
-VALID_DISPATCH_MODES = {
-    "native_custom_agent",
-    "codex_exec",
-    "main_task_fallback",
-    "main_task_direct",
-}
 VALID_PHASES = {"plan", "build", "test", "qa"}
 MODEL_AGENTS = {
     ("gpt-6-luna", "medium"): "pas_luna_worker",
@@ -70,13 +62,6 @@ MODEL_AGENTS = {
     ("gpt-6-astra", "low"): "pas_astra_low_worker",
     ("gpt-6-astra", "medium"): "pas_astra_medium_worker",
     ("gpt-6-astra", "high"): "pas_astra_high_worker",
-}
-LEGACY_RECORD_AGENTS = {
-    ("gpt-5.6-luna", "medium"): "pas_luna_worker",
-    ("gpt-5.6-terra", "medium"): "pas_terra_worker",
-    ("gpt-5.6-terra", "high"): "pas_terra_builder",
-    ("gpt-5.6-sol", "high"): "pas_sol_analyst",
-    ("gpt-5.6-sol", "max"): "pas_sol_max_worker",
 }
 SANDBOX_RANK = {
     "read-only": 0,
@@ -90,34 +75,6 @@ ESCALATION_CHAIN = {
     ("gpt-6-sol", "high"): ("gpt-6-astra", "low"),
     ("gpt-6-astra", "low"): ("gpt-6-astra", "medium"),
     ("gpt-6-astra", "medium"): ("gpt-6-astra", "high"),
-}
-ALLOWED_RECORD_FIELDS = {
-    "recorded_at",
-    "task_family",
-    "axes",
-    "model",
-    "effort",
-    "outcome",
-    "verification_command",
-    "verification_result",
-    "model_version",
-    "policy_version",
-    "session_id",
-    "failure_type",
-    "note",
-    "phase",
-    "agent_name",
-    "dispatch_mode",
-}
-REQUIRED_RECORD_FIELDS = {
-    "task_family",
-    "axes",
-    "model",
-    "effort",
-    "outcome",
-    "model_version",
-    "policy_version",
-    "session_id",
 }
 
 
@@ -701,73 +658,6 @@ def _parse_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def append_record(
-    path: Path,
-    record: Mapping[str, Any],
-    *,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    unsupported = set(record) - ALLOWED_RECORD_FIELDS
-    if unsupported:
-        raise ValueError(f"unsupported record fields: {sorted(unsupported)}")
-    missing = REQUIRED_RECORD_FIELDS - set(record)
-    if missing:
-        raise ValueError(f"record missing fields: {sorted(missing)}")
-    if record["model"] not in VALID_MODELS:
-        raise ValueError(f"unsupported model: {record['model']}")
-    expected_model_version = MODEL_VERSIONS[str(record["model"])]
-    if record["model_version"] != expected_model_version:
-        raise ValueError(
-            f"model_version {record['model_version']!r} does not match "
-            f"model {record['model']!r} ({expected_model_version!r})"
-        )
-    if record["effort"] not in VALID_EFFORTS:
-        raise ValueError(f"unsupported effort: {record['effort']}")
-    if record["effort"] not in MODEL_EFFORTS[str(record["model"])]:
-        raise ValueError(
-            f"unsupported effort {record['effort']!r} for model {record['model']!r}"
-        )
-    if record["outcome"] not in VALID_OUTCOMES:
-        raise ValueError(f"unsupported outcome: {record['outcome']}")
-    dispatch_mode = str(record.get("dispatch_mode", "")).strip()
-    if dispatch_mode and dispatch_mode not in VALID_DISPATCH_MODES:
-        raise ValueError(f"unsupported dispatch mode: {dispatch_mode}")
-    phase = str(record.get("phase", "")).strip()
-    if dispatch_mode and phase not in VALID_PHASES:
-        raise ValueError("dispatch records require a valid phase")
-    if dispatch_mode in {"native_custom_agent", "codex_exec"}:
-        agent_name = str(record.get("agent_name", "")).strip()
-        if not agent_name:
-            raise ValueError("external worker dispatch records require agent_name")
-        combo = (str(record["model"]), str(record["effort"]))
-        expected_agent = MODEL_AGENTS.get(combo) or LEGACY_RECORD_AGENTS.get(combo)
-        if expected_agent is None:
-            raise ValueError("external worker model and effort have no registered agent_name")
-        if agent_name != expected_agent:
-            raise ValueError(
-                f"agent_name {agent_name!r} does not match model worker {expected_agent!r}"
-            )
-    if record["outcome"].startswith("verified_") and not (
-        str(record.get("verification_command", "")).strip()
-        and str(record.get("verification_result", "")).strip()
-    ):
-        raise ValueError("verified outcomes require verification evidence")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", str(record["task_family"])):
-        raise ValueError("task_family must be a non-sensitive hyphen-case label")
-
-    timestamp = now or datetime.now(timezone.utc)
-    payload = {key: record[key] for key in ALLOWED_RECORD_FIELDS if key in record}
-    payload["recorded_at"] = str(record.get("recorded_at") or timestamp.isoformat())
-    payload.setdefault("verification_command", "")
-    payload.setdefault("verification_result", "")
-    payload.setdefault("failure_type", "")
-    payload.setdefault("note", "")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    return payload
-
-
 def query_records(
     path: Path,
     *,
@@ -925,187 +815,47 @@ def _recommend_from_task_command(args: argparse.Namespace, *, phase: str | None 
     return {**result, "classification": classification}
 
 
-def _execution_allowed_paths(task_text: str) -> list[str]:
-    """Require an explicit, narrow allowed-path section for executable cards."""
-    section = re.search(
-        r"^#{1,6}\s+Allowed paths\s*$\n(.*?)(?=^#{1,6}\s+|\Z)",
-        task_text, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+def route_task(args: argparse.Namespace) -> dict[str, Any]:
+    """Return a stable routing decision without launching or writing anything."""
+    recommendation = _recommend_from_task_command(args, phase=args.phase)
+    dispatch = build_dispatch(
+        recommendation,
+        phase=args.phase,
+        task_scope="phase",
+        parent_sandbox=args.parent_sandbox,
+        exec_sandbox=args.exec_sandbox,
+        parent_approval_policy=args.parent_approval_policy,
+        approval_boundary_confirmed=args.approval_boundary_confirmed,
     )
-    if section is None:
-        raise ValueError("task card needs an explicit Allowed paths section")
-    paths = _task_card_paths(task_text)
-    if not paths:
-        raise ValueError("task card needs at least one allowed path")
-    for path in paths:
-        core = path[:-3] if path.endswith("/**") else path
-        if (
-            not core or core.startswith("/") or "\\" in core
-            or any(part in {"", ".", ".."} for part in core.split("/"))
-            or any(char in core for char in "*?[]")
-        ):
-            raise ValueError("task card contains an unsafe allowed path")
-    return paths
-
-
-def _reported_result(stdout: str) -> dict[str, Any]:
-    """Take the last structured agent message from Codex JSONL output."""
-    result: dict[str, Any] = {}
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        item = event.get("item", {})
-        if not isinstance(item, dict):
-            continue
-        if event.get("type") != "item.completed" or item.get("type") != "agent_message":
-            continue
-        raw_message = item.get("text", "")
-        if not isinstance(raw_message, str):
-            continue
-        message = raw_message.strip()
-        if message.startswith("```json") and message.endswith("```"):
-            message = message[7:-3].strip()
-        try:
-            candidate = json.loads(message)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(candidate, dict):
-            result = candidate
-    return result
-
-
-def _within_allowed_path(path: str, allowed: list[str]) -> bool:
-    if (
-        not path or path.startswith("/") or "\\" in path
-        or any(part in {"", ".", ".."} for part in path.split("/"))
-    ):
-        return False
-    return any(
-        path == rule or (rule.endswith("/**") and path.startswith(rule[:-2]))
-        for rule in allowed
-    )
-
-
-def run_task(args: argparse.Namespace) -> dict[str, Any]:
-    """Run one classified, bounded task through the existing Codex dispatch."""
-    summary: dict[str, Any] = {
-        "task_family": None, "classification": None, "model": None,
-        "effort": None, "agent_name": None, "dispatch_mode": None,
-        "child_exit_code": None, "execution_status": "blocked",
-        "changed_paths": [], "verification_evidence": None,
-    }
-    try:
-        classification = classify_task_file(args.task_file)
-        task_text = args.task_file.read_text(encoding="utf-8")
-        allowed_paths = _execution_allowed_paths(task_text)
-        recommendation = _recommend_from_task_command(args, phase=args.phase)
-        dispatch = build_dispatch(
-            recommendation, phase=args.phase, task_scope="phase",
-            parent_sandbox=args.parent_sandbox, exec_sandbox=args.exec_sandbox,
-            parent_approval_policy=args.parent_approval_policy,
-            approval_boundary_confirmed=args.approval_boundary_confirmed,
-        )
-    except (OSError, ValueError) as error:
-        summary["blocker"] = str(error)
-        return summary
-    summary.update({
+    combo = (str(dispatch["model"]), str(dispatch["effort"]))
+    automatic = combo in AUTOMATIC_MODEL_EFFORTS and not dispatch["dispatch_blocked"]
+    next_combo = ESCALATION_CHAIN.get(combo) if automatic else None
+    classification = recommendation["classification"]
+    return {
+        "schema_version": "1.0",
         "task_family": recommendation["task_family"],
         "classification": classification,
-        "model": dispatch["model"], "effort": dispatch["effort"],
+        "phase": args.phase,
+        "model": dispatch["model"],
+        "effort": dispatch["effort"],
+        "model_version": dispatch["model_version"],
+        "policy_version": dispatch["policy_version"],
+        "rule_id": dispatch["rule_id"],
         "agent_name": dispatch["agent_name"],
-    })
-    if not dispatch["codex_exec_ready"] or not dispatch["agent_name"] or dispatch["dispatch_blocked"]:
-        summary["blocker"] = dispatch["codex_exec_blocker"] or "no exact executable worker mapping"
-        return summary
-    prompt = (
-        "Execute only the supplied bounded task card. Honor its Allowed paths; do not widen "
-        "scope. Run the validation requested by the card. Stop on missing authority or "
-        "unavailable capability. Do not commit or push unless the task card explicitly "
-        "requires it. Return a final JSON object only, with changed_paths as a list of "
-        "workspace-relative paths and verification_evidence as an object containing "
-        "command and result; use null for missing evidence.\n\n"
-        "<bounded_task_card>\n" + task_text + "\n</bounded_task_card>"
-    )
-    try:
-        child = subprocess.run(
-            [*dispatch["fallback_command"], "-"], input=prompt,
-            text=True, capture_output=True, check=False,
-        )
-    except OSError as error:
-        summary.update(execution_status="failed", blocker=f"Codex could not launch: {error}")
-        return summary
-    summary["dispatch_mode"] = "codex_exec"
-    summary["child_exit_code"] = child.returncode
-    if child.returncode != 0:
-        error_text = child.stderr.strip()
-        if not error_text:
-            for line in child.stdout.splitlines():
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                if event.get("type") in {"error", "turn.failed"}:
-                    error_text = str(event.get("message") or event.get("error") or "")
-        if error_text:
-            summary["child_error"] = error_text.replace(task_text, "[task card redacted]")[:300]
-    reported = _reported_result(child.stdout)
-    changed = reported.get("changed_paths")
-    if isinstance(changed, list) and all(isinstance(path, str) for path in changed):
-        summary["changed_paths"] = changed
-    evidence = reported.get("verification_evidence")
-    if isinstance(evidence, dict):
-        command, result = evidence.get("command"), evidence.get("result")
-        if (
-            isinstance(command, str) and isinstance(result, str)
-            and command.strip() and len(command) <= 512
-            and "\n" not in command and "\r" not in command
-            and task_text.strip() not in command
-            and result.strip().lower() in {"passed", "failed"}
-        ):
-            summary["verification_evidence"] = {
-                "command": command, "result": result.strip().lower(),
-            }
-    if isinstance(changed, list) and any(
-        not isinstance(path, str) or not _within_allowed_path(path, allowed_paths)
-        for path in changed
-    ):
-        summary["execution_status"] = "out_of_scope"
-    elif child.returncode != 0:
-        summary["execution_status"] = "failed"
-    else:
-        summary["execution_status"] = "success"
-    outcome = "partial"
-    if (
-        summary["execution_status"] == "success"
-        and isinstance(changed, list)
-        and summary["verification_evidence"]
-        and summary["verification_evidence"]["result"] == "passed"
-    ):
-        outcome = "verified_pass"
-    elif (
-        summary["execution_status"] == "failed"
-        and summary["verification_evidence"]
-        and summary["verification_evidence"]["result"] == "failed"
-    ):
-        outcome = "verified_fail"
-    record = {
-        "task_family": recommendation["task_family"], "axes": recommendation["axes"],
-        "model": dispatch["model"], "effort": dispatch["effort"],
-        "outcome": outcome, "model_version": recommendation["model_version"],
-        "policy_version": recommendation["policy_version"],
-        "session_id": current_session()["session_id"], "phase": args.phase,
-        "agent_name": dispatch["agent_name"], "dispatch_mode": "codex_exec",
-        "verification_command": (summary["verification_evidence"] or {}).get("command", ""),
-        "verification_result": (summary["verification_evidence"] or {}).get("result", ""),
+        "automatic": automatic,
+        "next_escalation": (
+            {"model": next_combo[0], "effort": next_combo[1]}
+            if next_combo else None
+        ),
+        "reason_labels": sorted(set([*classification["reasons"], dispatch["rule_id"]])),
+        "dispatch_capability": {
+            "exact_worker_registered": dispatch["agent_name"] is not None,
+            "native_custom_agent_ready": dispatch["native_custom_agent_ready"],
+            "codex_exec_ready": dispatch["codex_exec_ready"],
+            "codex_exec_blocker": dispatch["codex_exec_blocker"],
+            "dispatch_blocked": dispatch["dispatch_blocked"],
+        },
     }
-    append_record(args.registry, record)
-    summary["recorded_outcome"] = outcome
-    return summary
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1139,15 +889,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     dispatch_task_parser.add_argument("--approval-boundary-confirmed", action="store_true")
 
-    run_task_parser = commands.add_parser("run-task")
-    run_task_parser.add_argument("--task-file", type=Path, required=True)
-    run_task_parser.add_argument("--phase", choices=("plan", "build", "test", "qa"), required=True)
-    run_task_parser.add_argument("--parent-sandbox", choices=tuple(SANDBOX_RANK))
-    run_task_parser.add_argument("--exec-sandbox", choices=tuple(SANDBOX_RANK))
-    run_task_parser.add_argument(
+    route_task_parser = commands.add_parser("route-task")
+    route_task_parser.add_argument("--task-file", type=Path, required=True)
+    route_task_parser.add_argument("--phase", choices=("plan", "build", "test", "qa"), required=True)
+    route_task_parser.add_argument("--parent-sandbox", choices=tuple(SANDBOX_RANK))
+    route_task_parser.add_argument("--exec-sandbox", choices=tuple(SANDBOX_RANK))
+    route_task_parser.add_argument(
         "--parent-approval-policy", choices=tuple(sorted(VALID_APPROVAL_POLICIES))
     )
-    run_task_parser.add_argument("--approval-boundary-confirmed", action="store_true")
+    route_task_parser.add_argument("--approval-boundary-confirmed", action="store_true")
 
     dispatch_parser = commands.add_parser("dispatch")
     dispatch_parser.add_argument("--task-family", required=True)
@@ -1172,21 +922,6 @@ def _parser() -> argparse.ArgumentParser:
         choices=tuple(sorted(VALID_APPROVAL_POLICIES)),
     )
     dispatch_parser.add_argument("--approval-boundary-confirmed", action="store_true")
-
-    record_parser = commands.add_parser("record")
-    record_parser.add_argument("--task-family", required=True)
-    record_parser.add_argument("--axes-json", required=True)
-    record_parser.add_argument("--model", choices=sorted(VALID_MODELS), required=True)
-    record_parser.add_argument("--effort", choices=sorted(VALID_EFFORTS), required=True)
-    record_parser.add_argument("--outcome", choices=sorted(VALID_OUTCOMES), required=True)
-    record_parser.add_argument("--verification-command", default="")
-    record_parser.add_argument("--verification-result", default="")
-    record_parser.add_argument("--session-id", default="")
-    record_parser.add_argument("--failure-type", default="")
-    record_parser.add_argument("--note", default="")
-    record_parser.add_argument("--phase", choices=("plan", "build", "test", "qa"), default="")
-    record_parser.add_argument("--agent-name", default="")
-    record_parser.add_argument("--dispatch-mode", choices=sorted(VALID_DISPATCH_MODES), default="")
 
     query_parser = commands.add_parser("query")
     query_parser.add_argument("--task-family", required=True)
@@ -1220,10 +955,9 @@ def main() -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
-    if args.command == "run-task":
-        payload = run_task(args)
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0 if payload["execution_status"] == "success" else 1
+    if args.command == "route-task":
+        print(json.dumps(route_task(args), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if args.command == "dispatch":
         recommendation = _recommend_command(args, phase=args.phase)
         payload = build_dispatch(
@@ -1236,34 +970,6 @@ def main() -> int:
             approval_boundary_confirmed=args.approval_boundary_confirmed,
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
-    if args.command == "record":
-        policy = load_policy(args.policy)
-        axes = json.loads(args.axes_json)
-        if not isinstance(axes, dict):
-            raise ValueError("axes-json must decode to an object")
-        session_id = args.session_id.strip() or current_session()["session_id"]
-        saved = append_record(
-            args.registry,
-            {
-                "task_family": args.task_family,
-                "axes": axes,
-                "model": args.model,
-                "effort": args.effort,
-                "outcome": args.outcome,
-                "verification_command": args.verification_command,
-                "verification_result": args.verification_result,
-                "model_version": MODEL_VERSIONS[args.model],
-                "policy_version": policy["policy_version"],
-                "session_id": session_id,
-                "failure_type": args.failure_type,
-                "note": args.note,
-                "phase": args.phase,
-                "agent_name": args.agent_name,
-                "dispatch_mode": args.dispatch_mode,
-            },
-        )
-        print(json.dumps(saved, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "query":
         policy = load_policy(args.policy)

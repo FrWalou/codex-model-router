@@ -69,29 +69,32 @@ class ProjectAgentContractTests(unittest.TestCase):
 
 
 class SkillDocumentationContractTests(unittest.TestCase):
-    def test_skill_requires_capability_gated_actual_dispatch(self):
+    def test_skill_describes_decision_only_dispatch_boundary(self):
         text = SKILL_PATH.read_text(encoding="utf-8")
         for required in (
-            "dispatch_mode",
+            "routing decision engine only",
+            "route-task",
+            "dispatch_capability",
             "native_custom_agent",
             "codex_exec",
             "main_task_fallback",
             "main_task_direct",
         ):
             self.assertIn(required, text)
-        self.assertIn("Do not claim the active task changed models", text)
+        self.assertIn("It does not execute a worker", text)
 
     def test_skill_keeps_micro_tasks_in_main_task(self):
         text = SKILL_PATH.read_text(encoding="utf-8")
         self.assertIn("task_scope=micro", text)
         self.assertIn("main task", text.lower())
 
-    def test_skill_enforces_parent_boundary_and_rejects_scope_violations(self):
+    def test_skill_assigns_execution_safety_to_external_executor(self):
         text = SKILL_PATH.read_text(encoding="utf-8")
         self.assertIn("same or stricter", text.lower())
         self.assertIn("codex_exec_ready", text)
         self.assertIn("Reject the worker result", text)
         self.assertIn("out-of-scope", text)
+        self.assertIn("separate validator/outcome collector", text)
 
     def test_readme_covers_public_installation_operation_and_limits(self):
         text = README_PATH.read_text(encoding="utf-8")
@@ -106,9 +109,9 @@ class SkillDocumentationContractTests(unittest.TestCase):
             self.assertIn(heading, text)
         self.assertIn(".agents/skills/codex-model-router", text)
         self.assertIn(".codex/agents", text)
-        self.assertIn("does not silently switch", text.lower())
+        self.assertIn("routing decision engine only", text)
         self.assertIn("operator-enforced", text.lower())
-        self.assertIn("same or stricter", text.lower())
+        self.assertIn("same-or-stricter", text.lower())
 
 
 if __name__ == "__main__":
