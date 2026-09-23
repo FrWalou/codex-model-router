@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -924,6 +925,189 @@ def _recommend_from_task_command(args: argparse.Namespace, *, phase: str | None 
     return {**result, "classification": classification}
 
 
+def _execution_allowed_paths(task_text: str) -> list[str]:
+    """Require an explicit, narrow allowed-path section for executable cards."""
+    section = re.search(
+        r"^#{1,6}\s+Allowed paths\s*$\n(.*?)(?=^#{1,6}\s+|\Z)",
+        task_text, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    if section is None:
+        raise ValueError("task card needs an explicit Allowed paths section")
+    paths = _task_card_paths(task_text)
+    if not paths:
+        raise ValueError("task card needs at least one allowed path")
+    for path in paths:
+        core = path[:-3] if path.endswith("/**") else path
+        if (
+            not core or core.startswith("/") or "\\" in core
+            or any(part in {"", ".", ".."} for part in core.split("/"))
+            or any(char in core for char in "*?[]")
+        ):
+            raise ValueError("task card contains an unsafe allowed path")
+    return paths
+
+
+def _reported_result(stdout: str) -> dict[str, Any]:
+    """Take the last structured agent message from Codex JSONL output."""
+    result: dict[str, Any] = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item", {})
+        if not isinstance(item, dict):
+            continue
+        if event.get("type") != "item.completed" or item.get("type") != "agent_message":
+            continue
+        raw_message = item.get("text", "")
+        if not isinstance(raw_message, str):
+            continue
+        message = raw_message.strip()
+        if message.startswith("```json") and message.endswith("```"):
+            message = message[7:-3].strip()
+        try:
+            candidate = json.loads(message)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(candidate, dict):
+            result = candidate
+    return result
+
+
+def _within_allowed_path(path: str, allowed: list[str]) -> bool:
+    if (
+        not path or path.startswith("/") or "\\" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return False
+    return any(
+        path == rule or (rule.endswith("/**") and path.startswith(rule[:-2]))
+        for rule in allowed
+    )
+
+
+def run_task(args: argparse.Namespace) -> dict[str, Any]:
+    """Run one classified, bounded task through the existing Codex dispatch."""
+    summary: dict[str, Any] = {
+        "task_family": None, "classification": None, "model": None,
+        "effort": None, "agent_name": None, "dispatch_mode": None,
+        "child_exit_code": None, "execution_status": "blocked",
+        "changed_paths": [], "verification_evidence": None,
+    }
+    try:
+        classification = classify_task_file(args.task_file)
+        task_text = args.task_file.read_text(encoding="utf-8")
+        allowed_paths = _execution_allowed_paths(task_text)
+        recommendation = _recommend_from_task_command(args, phase=args.phase)
+        dispatch = build_dispatch(
+            recommendation, phase=args.phase, task_scope="phase",
+            parent_sandbox=args.parent_sandbox, exec_sandbox=args.exec_sandbox,
+            parent_approval_policy=args.parent_approval_policy,
+            approval_boundary_confirmed=args.approval_boundary_confirmed,
+        )
+    except (OSError, ValueError) as error:
+        summary["blocker"] = str(error)
+        return summary
+    summary.update({
+        "task_family": recommendation["task_family"],
+        "classification": classification,
+        "model": dispatch["model"], "effort": dispatch["effort"],
+        "agent_name": dispatch["agent_name"],
+    })
+    if not dispatch["codex_exec_ready"] or not dispatch["agent_name"] or dispatch["dispatch_blocked"]:
+        summary["blocker"] = dispatch["codex_exec_blocker"] or "no exact executable worker mapping"
+        return summary
+    prompt = (
+        "Execute only the supplied bounded task card. Honor its Allowed paths; do not widen "
+        "scope. Run the validation requested by the card. Stop on missing authority or "
+        "unavailable capability. Do not commit or push unless the task card explicitly "
+        "requires it. Return a final JSON object only, with changed_paths as a list of "
+        "workspace-relative paths and verification_evidence as an object containing "
+        "command and result; use null for missing evidence.\n\n"
+        "<bounded_task_card>\n" + task_text + "\n</bounded_task_card>"
+    )
+    try:
+        child = subprocess.run(
+            [*dispatch["fallback_command"], "-"], input=prompt,
+            text=True, capture_output=True, check=False,
+        )
+    except OSError as error:
+        summary.update(execution_status="failed", blocker=f"Codex could not launch: {error}")
+        return summary
+    summary["dispatch_mode"] = "codex_exec"
+    summary["child_exit_code"] = child.returncode
+    if child.returncode != 0:
+        error_text = child.stderr.strip()
+        if not error_text:
+            for line in child.stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") in {"error", "turn.failed"}:
+                    error_text = str(event.get("message") or event.get("error") or "")
+        if error_text:
+            summary["child_error"] = error_text.replace(task_text, "[task card redacted]")[:300]
+    reported = _reported_result(child.stdout)
+    changed = reported.get("changed_paths")
+    if isinstance(changed, list) and all(isinstance(path, str) for path in changed):
+        summary["changed_paths"] = changed
+    evidence = reported.get("verification_evidence")
+    if isinstance(evidence, dict):
+        command, result = evidence.get("command"), evidence.get("result")
+        if (
+            isinstance(command, str) and isinstance(result, str)
+            and command.strip() and len(command) <= 512
+            and "\n" not in command and "\r" not in command
+            and task_text.strip() not in command
+            and result.strip().lower() in {"passed", "failed"}
+        ):
+            summary["verification_evidence"] = {
+                "command": command, "result": result.strip().lower(),
+            }
+    if isinstance(changed, list) and any(
+        not isinstance(path, str) or not _within_allowed_path(path, allowed_paths)
+        for path in changed
+    ):
+        summary["execution_status"] = "out_of_scope"
+    elif child.returncode != 0:
+        summary["execution_status"] = "failed"
+    else:
+        summary["execution_status"] = "success"
+    outcome = "partial"
+    if (
+        summary["execution_status"] == "success"
+        and isinstance(changed, list)
+        and summary["verification_evidence"]
+        and summary["verification_evidence"]["result"] == "passed"
+    ):
+        outcome = "verified_pass"
+    elif (
+        summary["execution_status"] == "failed"
+        and summary["verification_evidence"]
+        and summary["verification_evidence"]["result"] == "failed"
+    ):
+        outcome = "verified_fail"
+    record = {
+        "task_family": recommendation["task_family"], "axes": recommendation["axes"],
+        "model": dispatch["model"], "effort": dispatch["effort"],
+        "outcome": outcome, "model_version": recommendation["model_version"],
+        "policy_version": recommendation["policy_version"],
+        "session_id": current_session()["session_id"], "phase": args.phase,
+        "agent_name": dispatch["agent_name"], "dispatch_mode": "codex_exec",
+        "verification_command": (summary["verification_evidence"] or {}).get("command", ""),
+        "verification_result": (summary["verification_evidence"] or {}).get("result", ""),
+    }
+    append_record(args.registry, record)
+    summary["recorded_outcome"] = outcome
+    return summary
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
@@ -954,6 +1138,16 @@ def _parser() -> argparse.ArgumentParser:
         "--parent-approval-policy", choices=tuple(sorted(VALID_APPROVAL_POLICIES))
     )
     dispatch_task_parser.add_argument("--approval-boundary-confirmed", action="store_true")
+
+    run_task_parser = commands.add_parser("run-task")
+    run_task_parser.add_argument("--task-file", type=Path, required=True)
+    run_task_parser.add_argument("--phase", choices=("plan", "build", "test", "qa"), required=True)
+    run_task_parser.add_argument("--parent-sandbox", choices=tuple(SANDBOX_RANK))
+    run_task_parser.add_argument("--exec-sandbox", choices=tuple(SANDBOX_RANK))
+    run_task_parser.add_argument(
+        "--parent-approval-policy", choices=tuple(sorted(VALID_APPROVAL_POLICIES))
+    )
+    run_task_parser.add_argument("--approval-boundary-confirmed", action="store_true")
 
     dispatch_parser = commands.add_parser("dispatch")
     dispatch_parser.add_argument("--task-family", required=True)
@@ -1026,6 +1220,10 @@ def main() -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
+    if args.command == "run-task":
+        payload = run_task(args)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if payload["execution_status"] == "success" else 1
     if args.command == "dispatch":
         recommendation = _recommend_command(args, phase=args.phase)
         payload = build_dispatch(

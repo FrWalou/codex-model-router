@@ -22,6 +22,8 @@ Assign a non-sensitive hyphen-case `task_family`, a `phase` (`plan`, `build`, `t
 
 For a supplied structured task card, first run `scripts/advisor.py classify --task-file PATH`. The local classifier returns conservative axes, confidence, and non-sensitive signal labels without calling a model. Use `recommend-from-task` or `dispatch-from-task` to pass those axes to the advisor without retyping them. Otherwise run `scripts/advisor.py dispatch --help`, then call `dispatch` with explicit axes and `task_scope` (`micro`, `phase`, `workflow`).
 
+For a single already-bounded card, `scripts/advisor.py run-task --task-file PATH --phase build --parent-sandbox MODE --exec-sandbox MODE --parent-approval-policy POLICY --approval-boundary-confirmed` can launch one `codex exec` worker. It requires an explicit `Allowed paths` section, a registered exact worker mapping, and a safe confirmed boundary. Inspect the JSON summary and actual diff before integration; reported out-of-scope paths are rejected without rollback. It does not accept raw prompts or split tasks.
+
 ## Execute the dispatch
 
 Use this ordered contract:

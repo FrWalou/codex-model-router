@@ -127,6 +127,17 @@ python3 .agents/skills/codex-model-router/scripts/advisor.py dispatch-from-task 
 
 `classify` does not choose a model or launch a worker. It derives the existing axes from validation evidence, sensitive-change and concurrency signals, allowed-path spread, and explicitly independent workstreams. The normal advisor remains the routing authority; existing explicit-axis `recommend` and `dispatch` commands remain supported.
 
+To execute one already-bounded card, use `run-task` with an explicit parent boundary:
+
+```bash
+python3 .agents/skills/codex-model-router/scripts/advisor.py run-task \
+  --task-file .github/CODEX_TASK.md --phase build \
+  --parent-sandbox workspace-write --exec-sandbox workspace-write \
+  --parent-approval-policy on-request --approval-boundary-confirmed
+```
+
+This launches exactly one `codex exec` child using the selected model and effort. The card must have an `Allowed paths` section; unsafe boundaries or missing exact worker mappings block launch. The JSON summary reports the child exit code, changed paths, verification evidence, and execution status. Reported out-of-scope paths are rejected without automatic rollback. Only explicit `passed` or `failed` verification evidence is recorded as verified; missing or ambiguous evidence is recorded as partial. Task prose is not stored in the outcome registry. `run-task` does not accept raw prompts or decompose work.
+
 The JSON result includes the model, effort, policy rule, custom-agent name, whether delegation is required, supported dispatch modes, and `codex_exec_ready`. The executable fallback command is withheld unless the parent sandbox and approval policy are explicit, the child sandbox is the same or stricter, and the coordinator confirms the boundary. It passes the exact parent approval policy to the child command instead of relying on user defaults.
 
 ## How automatic routing works
