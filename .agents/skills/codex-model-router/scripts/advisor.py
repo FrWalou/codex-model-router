@@ -15,22 +15,44 @@ from typing import Any, Mapping
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_POLICY = HERE.parent / "references" / "policy.json"
-VALID_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"}
+VALID_MODELS = {
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6-astra",
+}
 VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 LEGACY_GPT_5_6_EFFORTS = {"low", "medium", "high", "max", "ultra"}
 MODEL_EFFORTS = {
     "gpt-5.6-luna": LEGACY_GPT_5_6_EFFORTS,
     "gpt-5.6-terra": LEGACY_GPT_5_6_EFFORTS,
     "gpt-5.6-sol": LEGACY_GPT_5_6_EFFORTS,
-    "gpt-6-astra": {"low", "medium", "high", "xhigh", "max"},
+    "gpt-6-luna": {"low", "medium", "high", "xhigh", "max"},
+    "gpt-6-sol": {"low", "medium", "high", "xhigh", "max", "ultra"},
+    "gpt-6-astra": {"low", "medium", "high", "xhigh", "max", "ultra"},
 }
 MODEL_VERSIONS = {
     "gpt-5.6-luna": "gpt-5.6",
     "gpt-5.6-terra": "gpt-5.6",
     "gpt-5.6-sol": "gpt-5.6",
+    "gpt-6-luna": "gpt-6",
+    "gpt-6-sol": "gpt-6",
     "gpt-6-astra": "gpt-6",
 }
 AUTOMATIC_FORBIDDEN_EFFORTS = {"xhigh", "max", "ultra"}
+STATIC_MODEL_EFFORTS = {
+    ("gpt-6-luna", "medium"),
+    ("gpt-6-sol", "medium"),
+    ("gpt-6-sol", "high"),
+}
+AUTOMATIC_MODEL_EFFORTS = {
+    *STATIC_MODEL_EFFORTS,
+    ("gpt-6-astra", "low"),
+    ("gpt-6-astra", "medium"),
+    ("gpt-6-astra", "high"),
+}
 VALID_OUTCOMES = {"verified_pass", "verified_fail", "partial"}
 VALID_DISPATCH_MODES = {
     "native_custom_agent",
@@ -40,14 +62,20 @@ VALID_DISPATCH_MODES = {
 }
 VALID_PHASES = {"plan", "build", "test", "qa"}
 MODEL_AGENTS = {
+    ("gpt-6-luna", "medium"): "pas_luna_worker",
+    ("gpt-6-sol", "medium"): "pas_sol_worker",
+    ("gpt-6-sol", "high"): "pas_sol_analyst",
+    ("gpt-6-sol", "max"): "pas_sol_max_worker",
+    ("gpt-6-astra", "low"): "pas_astra_low_worker",
+    ("gpt-6-astra", "medium"): "pas_astra_medium_worker",
+    ("gpt-6-astra", "high"): "pas_astra_high_worker",
+}
+LEGACY_RECORD_AGENTS = {
     ("gpt-5.6-luna", "medium"): "pas_luna_worker",
     ("gpt-5.6-terra", "medium"): "pas_terra_worker",
     ("gpt-5.6-terra", "high"): "pas_terra_builder",
     ("gpt-5.6-sol", "high"): "pas_sol_analyst",
     ("gpt-5.6-sol", "max"): "pas_sol_max_worker",
-    ("gpt-6-astra", "low"): "pas_astra_low_worker",
-    ("gpt-6-astra", "medium"): "pas_astra_medium_worker",
-    ("gpt-6-astra", "high"): "pas_astra_high_worker",
 }
 SANDBOX_RANK = {
     "read-only": 0,
@@ -56,11 +84,9 @@ SANDBOX_RANK = {
 }
 VALID_APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 ESCALATION_CHAIN = {
-    ("gpt-5.6-luna", "low"): ("gpt-5.6-luna", "medium"),
-    ("gpt-5.6-luna", "medium"): ("gpt-5.6-terra", "medium"),
-    ("gpt-5.6-terra", "medium"): ("gpt-5.6-terra", "high"),
-    ("gpt-5.6-terra", "high"): ("gpt-5.6-sol", "high"),
-    ("gpt-5.6-sol", "high"): ("gpt-6-astra", "low"),
+    ("gpt-6-luna", "medium"): ("gpt-6-sol", "medium"),
+    ("gpt-6-sol", "medium"): ("gpt-6-sol", "high"),
+    ("gpt-6-sol", "high"): ("gpt-6-astra", "low"),
     ("gpt-6-astra", "low"): ("gpt-6-astra", "medium"),
     ("gpt-6-astra", "medium"): ("gpt-6-astra", "high"),
 }
@@ -549,8 +575,11 @@ def recommend(
             selected = rule
             break
 
+    selected_combo = (str(selected["model"]), str(selected["effort"]))
     if selected["effort"] in AUTOMATIC_FORBIDDEN_EFFORTS:
         raise ValueError("static policy must not automatically select xhigh, max, or ultra")
+    if selected_combo not in STATIC_MODEL_EFFORTS:
+        raise ValueError("static policy selected an unsupported automatic model and effort")
 
     ultra = policy["ultra"]
     ultra_eligible = (
@@ -709,7 +738,8 @@ def append_record(
         agent_name = str(record.get("agent_name", "")).strip()
         if not agent_name:
             raise ValueError("external worker dispatch records require agent_name")
-        expected_agent = MODEL_AGENTS.get((str(record["model"]), str(record["effort"])))
+        combo = (str(record["model"]), str(record["effort"]))
+        expected_agent = MODEL_AGENTS.get(combo) or LEGACY_RECORD_AGENTS.get(combo)
         if expected_agent is None:
             raise ValueError("external worker model and effort have no registered agent_name")
         if agent_name != expected_agent:
@@ -776,20 +806,30 @@ def apply_history(
     recommendation: Mapping[str, Any], records: list[Mapping[str, Any]]
 ) -> dict[str, Any]:
     result = dict(recommendation)
+    target_model_version = result.get(
+        "model_version", MODEL_VERSIONS.get(str(result.get("model")))
+    )
+    generation_records = [
+        record
+        for record in records
+        if MODEL_VERSIONS.get(str(record.get("model"))) == target_model_version
+        and record.get("model_version", target_model_version) == target_model_version
+    ]
     passes = Counter(
         (record.get("model"), record.get("effort"))
-        for record in records
+        for record in generation_records
         if record.get("outcome") == "verified_pass"
     )
     failures = {
         (record.get("model"), record.get("effort"))
-        for record in records
+        for record in generation_records
         if record.get("outcome") == "verified_fail"
     }
     stable = [
         (count, model, effort)
         for (model, effort), count in passes.items()
         if count >= 2
+        and (model, effort) in AUTOMATIC_MODEL_EFFORTS
         and (model, effort) in MODEL_AGENTS
         and MODEL_VERSIONS.get(str(model))
         == result.get("model_version", MODEL_VERSIONS.get(str(result.get("model"))))
@@ -811,7 +851,12 @@ def apply_history(
         failed_combo = (str(result["model"]), str(result["effort"]))
         next_combo = ESCALATION_CHAIN.get(failed_combo)
         visited = {failed_combo}
-        while next_combo in failures:
+        while next_combo is not None:
+            if next_combo not in AUTOMATIC_MODEL_EFFORTS or next_combo not in MODEL_AGENTS:
+                next_combo = None
+                break
+            if next_combo not in failures:
+                break
             if next_combo in visited:
                 next_combo = None
                 break

@@ -1,6 +1,6 @@
 ---
 name: codex-model-router
-description: Use when a Codex task needs an explicit GPT-5.6 or GPT-6 Astra model and reasoning-effort choice, spans planning, implementation, testing, or QA phases, should delegate work automatically by difficulty or volume, or needs evidence-based escalation from a prior model choice.
+description: Use when a Codex task needs an explicit GPT-6 Luna, Sol, or Astra model and reasoning-effort choice, spans planning, implementation, testing, or QA phases, should delegate work automatically by difficulty or volume, or needs evidence-based escalation from a prior model choice.
 ---
 
 # Codex Model Router
@@ -38,15 +38,14 @@ After every worker returns, compare its reported changed paths and the actual di
 The project agents are:
 
 - `pas_luna_worker`: repeatable, validator-backed, high-volume, or deterministic test work
-- `pas_terra_worker`: ordinary Terra Medium analysis and implementation
-- `pas_terra_builder`: normal implementation, integration, and moderately complex debugging
+- `pas_sol_worker`: normal Sol Medium implementation, integration, and analysis
 - `pas_sol_analyst`: architecture, ambiguous high-failure-cost work, and independent high-risk QA
 - `pas_sol_max_worker`: explicit/manual-only Sol Max work
 - `pas_astra_low_worker`: first bounded Astra escalation after a named Sol High failure
 - `pas_astra_medium_worker`: bounded Astra escalation after an Astra Low failure
 - `pas_astra_high_worker`: bounded Astra escalation after named lower-tier failures
 
-Route from the axes, not the phase name alone. Astra is not statically selected; its automatic chain is Sol High → Astra Low → Astra Medium → Astra High. Astra xhigh/max, Sol Max, and Ultra are explicit/manual-only and never selected automatically.
+Route from the axes, not the phase name alone. The automatic chain is Luna Medium → Sol Medium → Sol High → Astra Low → Astra Medium → Astra High → blocked. Astra is never statically selected. The local Codex catalog supplies each model's accepted efforts; xhigh, max, and ultra remain explicit/manual-only and never enter automatic routing or history overrides. Historical GPT-5.6 records remain readable but cannot alter GPT-6 recommendations.
 
 ## Escalate and record
 

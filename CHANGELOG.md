@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+- Migrated automatic routing to GPT-6 Luna Medium and Sol Medium/High, with bounded Astra escalation; removed legacy Terra agents while retaining historical GPT-5.6 records.
+- Matched accepted GPT-6 efforts to the local Codex catalog; xhigh, max, and ultra remain manual-only.
 - Added deterministic local task-card classification with conservative routing-axis handoff.
 - Added GPT-6 Astra as the final evidence-gated escalation tier with bounded Low, Medium, and High workers.
-- Kept Astra xhigh/max manual-only and preserved Luna/Terra/Sol static routing.
+- Kept Astra xhigh/max manual-only in the previous routing generation.
 
 ## 0.1.0 - 2026-07-15
 

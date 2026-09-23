@@ -28,6 +28,20 @@ class AdvisorPolicyTests(unittest.TestCase):
         cls.advisor = load_advisor()
         cls.policy = cls.advisor.load_policy(POLICY_PATH)
 
+    def test_gpt_6_effort_metadata_matches_local_codex_catalog(self):
+        self.assertEqual(
+            self.advisor.MODEL_EFFORTS["gpt-6-luna"],
+            {"low", "medium", "high", "xhigh", "max"},
+        )
+        self.assertEqual(
+            self.advisor.MODEL_EFFORTS["gpt-6-sol"],
+            {"low", "medium", "high", "xhigh", "max", "ultra"},
+        )
+        self.assertEqual(
+            self.advisor.MODEL_EFFORTS["gpt-6-astra"],
+            {"low", "medium", "high", "xhigh", "max", "ultra"},
+        )
+
     def test_routes_verifiable_high_volume_work_to_luna_medium(self):
         result = self.advisor.recommend(
             self.policy,
@@ -42,9 +56,60 @@ class AdvisorPolicyTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["model"], "gpt-5.6-luna")
+        self.assertEqual(result["model"], "gpt-6-luna")
         self.assertEqual(result["effort"], "medium")
         self.assertEqual(result["rule_id"], "verifiable-high-volume")
+
+    def test_routes_clear_repeatable_work_to_luna_medium(self):
+        result = self.advisor.recommend(
+            self.policy,
+            task_family="validator-backed-change",
+            axes={
+                "verifiable": "yes",
+                "failcost": "low",
+                "volume": "low",
+                "depth": "shallow",
+                "decomposable": "no",
+                "workstreams": 1,
+            },
+        )
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-luna", "medium"))
+        self.assertEqual(result["rule_id"], "clear-repeatable-work")
+
+    def test_routes_balanced_default_to_sol_medium(self):
+        result = self.advisor.recommend(
+            self.policy,
+            task_family="bounded-implementation",
+            axes={
+                "verifiable": "yes",
+                "failcost": "mid",
+                "volume": "mid",
+                "depth": "medium",
+                "decomposable": "no",
+                "workstreams": 1,
+            },
+        )
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "medium"))
+        self.assertEqual(result["rule_id"], "balanced-default")
+
+    def test_routes_complex_build_to_sol_high(self):
+        result = self.advisor.recommend(
+            self.policy,
+            task_family="complex-build",
+            axes={
+                "verifiable": "yes",
+                "failcost": "mid",
+                "volume": "mid",
+                "depth": "deep",
+                "decomposable": "no",
+                "workstreams": 1,
+            },
+        )
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
+        self.assertEqual(result["rule_id"], "complex-build")
 
     def test_routes_ambiguous_high_risk_deep_work_to_sol_high(self):
         result = self.advisor.recommend(
@@ -60,10 +125,27 @@ class AdvisorPolicyTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["model"], "gpt-5.6-sol")
+        self.assertEqual(result["model"], "gpt-6-sol")
         self.assertEqual(result["effort"], "high")
 
-    def test_routes_partially_verifiable_medium_depth_analysis_to_terra_high(self):
+    def test_routes_ambiguous_high_risk_medium_work_to_sol_high(self):
+        result = self.advisor.recommend(
+            self.policy,
+            task_family="ambiguous-high-risk-change",
+            axes={
+                "verifiable": "partial",
+                "failcost": "high",
+                "volume": "low",
+                "depth": "medium",
+                "decomposable": "no",
+                "workstreams": 1,
+            },
+        )
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
+        self.assertEqual(result["rule_id"], "high-risk-ambiguous-work")
+
+    def test_routes_partially_verifiable_medium_depth_analysis_to_sol_high(self):
         result = self.advisor.recommend(
             self.policy,
             task_family="domain-analysis",
@@ -77,7 +159,7 @@ class AdvisorPolicyTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["model"], "gpt-5.6-terra")
+        self.assertEqual(result["model"], "gpt-6-sol")
         self.assertEqual(result["effort"], "high")
         self.assertEqual(result["rule_id"], "judgment-and-analysis")
 
@@ -99,10 +181,31 @@ class AdvisorPolicyTests(unittest.TestCase):
         self.assertTrue(result["ultra_eligible"])
         self.assertIn("explicit", result["ultra_note"].lower())
 
-    def test_static_policy_never_selects_xhigh_or_max(self):
+    def test_static_policy_never_selects_xhigh_max_or_ultra(self):
         for selected in [*self.policy["rules"], self.policy["fallback"]]:
             with self.subTest(rule=selected["id"]):
-                self.assertNotIn(selected["effort"], {"xhigh", "max"})
+                self.assertNotIn(selected["effort"], {"xhigh", "max", "ultra"})
+                self.assertIn(
+                    (selected["model"], selected["effort"]),
+                    self.advisor.STATIC_MODEL_EFFORTS,
+                )
+
+    def test_automatic_escalation_chain_is_exact_and_acyclic(self):
+        self.assertEqual(
+            self.advisor.ESCALATION_CHAIN,
+            {
+                ("gpt-6-luna", "medium"): ("gpt-6-sol", "medium"),
+                ("gpt-6-sol", "medium"): ("gpt-6-sol", "high"),
+                ("gpt-6-sol", "high"): ("gpt-6-astra", "low"),
+                ("gpt-6-astra", "low"): ("gpt-6-astra", "medium"),
+                ("gpt-6-astra", "medium"): ("gpt-6-astra", "high"),
+            },
+        )
+        for source, target in self.advisor.ESCALATION_CHAIN.items():
+            self.assertIn(source, self.advisor.AUTOMATIC_MODEL_EFFORTS)
+            self.assertIn(target, self.advisor.AUTOMATIC_MODEL_EFFORTS)
+            self.assertNotIn(source[1], self.advisor.AUTOMATIC_FORBIDDEN_EFFORTS)
+            self.assertNotIn(target[1], self.advisor.AUTOMATIC_FORBIDDEN_EFFORTS)
 
     def test_unknown_session_is_reported_instead_of_scanning_rollouts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -129,7 +232,7 @@ class AdvisorPolicyTests(unittest.TestCase):
 
     def test_dispatch_maps_recommendation_to_model_specific_agent(self):
         recommendation = {
-            "model": "gpt-5.6-luna",
+            "model": "gpt-6-luna",
             "effort": "medium",
             "rule_id": "clear-repeatable-work",
         }
@@ -149,25 +252,36 @@ class AdvisorPolicyTests(unittest.TestCase):
         self.assertTrue(result["dispatch_required"])
         self.assertIsNone(result["dispatch_mode"])
         self.assertTrue(result["codex_exec_ready"])
-        self.assertEqual(result["fallback_command"][0:4], ["codex", "exec", "-m", "gpt-5.6-luna"])
+        self.assertEqual(result["fallback_command"][0:4], ["codex", "exec", "-m", "gpt-6-luna"])
         self.assertIn("read-only", result["fallback_command"])
         self.assertIn('approval_policy="on-request"', result["fallback_command"])
         self.assertIn("--json", result["fallback_command"])
 
     def test_native_agent_matches_the_recommended_effort(self):
-        terra = self.advisor.build_dispatch(
-            {"model": "gpt-5.6-terra", "effort": "medium"},
+        sol_medium = self.advisor.build_dispatch(
+            {"model": "gpt-6-sol", "effort": "medium"},
             phase="build",
             task_scope="phase",
         )
         sol = self.advisor.build_dispatch(
-            {"model": "gpt-5.6-sol", "effort": "max"},
+            {"model": "gpt-6-sol", "effort": "max"},
             phase="qa",
             task_scope="phase",
         )
 
-        self.assertEqual(terra["agent_name"], "pas_terra_worker")
+        self.assertEqual(sol_medium["agent_name"], "pas_sol_worker")
         self.assertEqual(sol["agent_name"], "pas_sol_max_worker")
+
+    def test_legacy_terra_workers_are_not_available_for_dispatch(self):
+        for effort in ("medium", "high"):
+            with self.subTest(effort=effort):
+                result = self.advisor.build_dispatch(
+                    {"model": "gpt-5.6-terra", "effort": effort},
+                    phase="build",
+                    task_scope="phase",
+                )
+                self.assertIsNone(result["agent_name"])
+                self.assertFalse(result["native_custom_agent_ready"])
 
     def test_astra_automatic_tiers_map_to_exact_workers(self):
         for effort, agent_name in (
@@ -184,11 +298,22 @@ class AdvisorPolicyTests(unittest.TestCase):
                 self.assertEqual(result["agent_name"], agent_name)
                 self.assertTrue(result["native_custom_agent_ready"])
 
-    def test_unregistered_astra_efforts_cannot_claim_native_agent_readiness(self):
-        for effort in ("xhigh", "max"):
-            with self.subTest(effort=effort):
+    def test_unregistered_manual_efforts_cannot_claim_native_agent_readiness(self):
+        for model, effort in (
+            ("gpt-6-luna", "low"),
+            ("gpt-6-luna", "high"),
+            ("gpt-6-luna", "xhigh"),
+            ("gpt-6-luna", "max"),
+            ("gpt-6-sol", "low"),
+            ("gpt-6-sol", "xhigh"),
+            ("gpt-6-sol", "ultra"),
+            ("gpt-6-astra", "xhigh"),
+            ("gpt-6-astra", "max"),
+            ("gpt-6-astra", "ultra"),
+        ):
+            with self.subTest(model=model, effort=effort):
                 result = self.advisor.build_dispatch(
-                    {"model": "gpt-6-astra", "effort": effort},
+                    {"model": model, "effort": effort},
                     phase="qa",
                     task_scope="phase",
                 )
@@ -197,7 +322,7 @@ class AdvisorPolicyTests(unittest.TestCase):
 
     def test_exec_fallback_is_blocked_without_explicit_boundary_confirmation(self):
         result = self.advisor.build_dispatch(
-            {"model": "gpt-5.6-terra", "effort": "high"},
+            {"model": "gpt-6-sol", "effort": "high"},
             phase="build",
             task_scope="phase",
             parent_sandbox="workspace-write",
@@ -212,7 +337,7 @@ class AdvisorPolicyTests(unittest.TestCase):
 
     def test_exec_fallback_rejects_a_more_permissive_sandbox(self):
         result = self.advisor.build_dispatch(
-            {"model": "gpt-5.6-terra", "effort": "high"},
+            {"model": "gpt-6-sol", "effort": "high"},
             phase="build",
             task_scope="phase",
             parent_sandbox="read-only",
@@ -227,7 +352,7 @@ class AdvisorPolicyTests(unittest.TestCase):
 
     def test_exec_fallback_requires_an_explicit_parent_approval_policy(self):
         result = self.advisor.build_dispatch(
-            {"model": "gpt-5.6-terra", "effort": "high"},
+            {"model": "gpt-6-sol", "effort": "high"},
             phase="build",
             task_scope="phase",
             parent_sandbox="workspace-write",
@@ -241,7 +366,7 @@ class AdvisorPolicyTests(unittest.TestCase):
 
     def test_micro_task_stays_in_main_task(self):
         result = self.advisor.build_dispatch(
-            {"model": "gpt-5.6-luna", "effort": "medium"},
+            {"model": "gpt-6-luna", "effort": "medium"},
             phase="build",
             task_scope="micro",
         )
@@ -397,47 +522,50 @@ class AdvisorRegistryTests(unittest.TestCase):
 
     def test_two_verified_passes_override_static_policy(self):
         recommendation = {
-            "model": "gpt-5.6-terra",
+            "model": "gpt-6-sol",
             "effort": "high",
+            "model_version": "gpt-6",
             "rule_id": "judgment-and-analysis",
         }
         records = [
-            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_pass"},
-            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-6-luna", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-6-luna", "effort": "medium", "outcome": "verified_pass"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
 
-        self.assertEqual(result["model"], "gpt-5.6-luna")
+        self.assertEqual(result["model"], "gpt-6-luna")
         self.assertEqual(result["effort"], "medium")
         self.assertEqual(result["rule_id"], "verified-history")
 
     def test_verified_failure_blocks_history_override_and_is_reported(self):
         recommendation = {
-            "model": "gpt-5.6-terra",
+            "model": "gpt-6-sol",
             "effort": "high",
+            "model_version": "gpt-6",
             "rule_id": "judgment-and-analysis",
         }
         records = [
-            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_pass"},
-            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_pass"},
-            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_fail"},
+            {"model": "gpt-6-luna", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-6-luna", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-6-luna", "effort": "medium", "outcome": "verified_fail"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
 
-        self.assertEqual(result["model"], "gpt-5.6-terra")
-        self.assertIn("gpt-5.6-luna · medium", result["avoid_combos"])
+        self.assertEqual(result["model"], "gpt-6-sol")
+        self.assertIn("gpt-6-luna · medium", result["avoid_combos"])
 
     def test_ultra_history_never_becomes_an_automatic_override(self):
         recommendation = {
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "high",
+            "model_version": "gpt-6",
             "rule_id": "ambiguous-high-risk",
         }
         records = [
-            {"model": "gpt-5.6-sol", "effort": "ultra", "outcome": "verified_pass"},
-            {"model": "gpt-5.6-sol", "effort": "ultra", "outcome": "verified_pass"},
+            {"model": "gpt-6-sol", "effort": "ultra", "outcome": "verified_pass"},
+            {"model": "gpt-6-sol", "effort": "ultra", "outcome": "verified_pass"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
@@ -447,13 +575,14 @@ class AdvisorRegistryTests(unittest.TestCase):
 
     def test_max_history_never_becomes_an_automatic_override(self):
         recommendation = {
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "high",
+            "model_version": "gpt-6",
             "rule_id": "high-risk-deep-work",
         }
         records = [
-            {"model": "gpt-5.6-sol", "effort": "max", "outcome": "verified_pass"},
-            {"model": "gpt-5.6-sol", "effort": "max", "outcome": "verified_pass"},
+            {"model": "gpt-6-sol", "effort": "max", "outcome": "verified_pass"},
+            {"model": "gpt-6-sol", "effort": "max", "outcome": "verified_pass"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
@@ -461,13 +590,14 @@ class AdvisorRegistryTests(unittest.TestCase):
         self.assertEqual(result["effort"], "high")
         self.assertEqual(result["rule_id"], "high-risk-deep-work")
 
-    def test_astra_xhigh_and_max_history_never_become_automatic_overrides(self):
+    def test_astra_manual_effort_history_never_becomes_an_automatic_override(self):
         recommendation = {
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "high",
+            "model_version": "gpt-6",
             "rule_id": "high-risk-deep-work",
         }
-        for effort in ("xhigh", "max"):
+        for effort in ("xhigh", "max", "ultra"):
             with self.subTest(effort=effort):
                 result = self.advisor.apply_history(
                     recommendation,
@@ -476,7 +606,7 @@ class AdvisorRegistryTests(unittest.TestCase):
                         {"model": "gpt-6-astra", "effort": effort, "outcome": "verified_pass"},
                     ],
                 )
-                self.assertEqual((result["model"], result["effort"]), ("gpt-5.6-sol", "high"))
+                self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
 
     def test_astra_outcome_can_be_recorded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -502,19 +632,41 @@ class AdvisorRegistryTests(unittest.TestCase):
 
         self.assertEqual((saved["model"], saved["effort"]), ("gpt-6-astra", "low"))
 
-    def test_astra_ultra_outcome_is_rejected(self):
+    def test_every_locally_supported_gpt_6_manual_effort_can_be_recorded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "outcomes.jsonl"
+            for model in ("gpt-6-luna", "gpt-6-sol", "gpt-6-astra"):
+                efforts = self.advisor.MODEL_EFFORTS[model]
+                for effort in efforts:
+                    with self.subTest(model=model, effort=effort):
+                        saved = self.advisor.append_record(
+                            path,
+                            {
+                                "task_family": "manual-routing",
+                                "axes": {"verifiable": "partial"},
+                                "model": model,
+                                "effort": effort,
+                                "outcome": "partial",
+                                "model_version": "gpt-6",
+                                "policy_version": "2026-09-23.v4",
+                                "session_id": "worker-456",
+                            },
+                        )
+                        self.assertEqual((saved["model"], saved["effort"]), (model, effort))
+
+    def test_locally_unsupported_gpt_6_effort_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "unsupported effort"):
                 self.advisor.append_record(
                     Path(temp_dir) / "outcomes.jsonl",
                     {
-                        "task_family": "architecture-migration",
+                        "task_family": "manual-routing",
                         "axes": {"verifiable": "partial"},
-                        "model": "gpt-6-astra",
+                        "model": "gpt-6-luna",
                         "effort": "ultra",
                         "outcome": "partial",
                         "model_version": "gpt-6",
-                        "policy_version": "2026-09-22.v3",
+                        "policy_version": "2026-09-23.v4",
                         "session_id": "worker-456",
                     },
                 )
@@ -536,21 +688,48 @@ class AdvisorRegistryTests(unittest.TestCase):
                     },
                 )
 
-    def test_astra_passes_do_not_override_a_gpt_5_6_recommendation(self):
+    def test_gpt_5_6_passes_do_not_override_a_gpt_6_recommendation(self):
         recommendation = {
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "high",
-            "model_version": "gpt-5.6",
+            "model_version": "gpt-6",
             "rule_id": "high-risk-deep-work",
         }
         records = [
-            {"model": "gpt-6-astra", "effort": "medium", "outcome": "verified_pass"},
-            {"model": "gpt-6-astra", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-5.6-luna", "effort": "medium", "outcome": "verified_pass"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
 
-        self.assertEqual((result["model"], result["effort"]), ("gpt-5.6-sol", "high"))
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
+
+    def test_gpt_5_6_failure_cannot_alter_gpt_6_escalation(self):
+        recommendation = {
+            "model": "gpt-6-sol",
+            "effort": "high",
+            "model_version": "gpt-6",
+            "rule_id": "high-risk-deep-work",
+        }
+        records = [
+            {
+                "model": "gpt-6-sol",
+                "effort": "high",
+                "model_version": "gpt-5.6",
+                "outcome": "verified_fail",
+            },
+            {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "model_version": "gpt-5.6",
+                "outcome": "verified_fail",
+            },
+        ]
+
+        result = self.advisor.apply_history(recommendation, records)
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
+        self.assertEqual(result["history_basis"], "no stable verified-history override")
 
     def test_xhigh_does_not_expand_legacy_model_efforts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -574,43 +753,63 @@ class AdvisorRegistryTests(unittest.TestCase):
 
     def test_unregistered_model_effort_history_never_overrides_policy(self):
         recommendation = {
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "high",
+            "model_version": "gpt-6",
             "rule_id": "high-risk-deep-work",
         }
         records = [
-            {"model": "gpt-5.6-sol", "effort": "medium", "outcome": "verified_pass"},
-            {"model": "gpt-5.6-sol", "effort": "medium", "outcome": "verified_pass"},
+            {"model": "gpt-6-sol", "effort": "low", "outcome": "verified_pass"},
+            {"model": "gpt-6-sol", "effort": "low", "outcome": "verified_pass"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
 
-        self.assertEqual((result["model"], result["effort"]), ("gpt-5.6-sol", "high"))
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
         self.assertEqual(result["rule_id"], "high-risk-deep-work")
 
     def test_verified_failure_escalates_away_from_the_failed_static_combo(self):
         recommendation = {
-            "model": "gpt-5.6-terra",
-            "effort": "high",
-            "rule_id": "complex-build",
+            "model": "gpt-6-luna",
+            "effort": "medium",
+            "model_version": "gpt-6",
+            "rule_id": "clear-repeatable-work",
         }
         records = [
-            {"model": "gpt-5.6-terra", "effort": "high", "outcome": "verified_fail"},
+            {"model": "gpt-6-luna", "effort": "medium", "outcome": "verified_fail"},
         ]
 
         result = self.advisor.apply_history(recommendation, records)
 
-        self.assertEqual((result["model"], result["effort"]), ("gpt-5.6-sol", "high"))
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "medium"))
         self.assertNotIn(
             f'{result["model"]} · {result["effort"]}',
             result["avoid_combos"],
         )
         self.assertEqual(result["rule_id"], "verified-failure-escalation")
 
-    def test_sol_failure_escalates_to_astra_then_astra_escalates_one_step(self):
+    def test_sol_medium_failure_escalates_to_sol_high(self):
+        result = self.advisor.apply_history(
+            {
+                "model": "gpt-6-sol",
+                "effort": "medium",
+                "model_version": "gpt-6",
+                "rule_id": "balanced-default",
+            },
+            [{"model": "gpt-6-sol", "effort": "medium", "outcome": "verified_fail"}],
+        )
+
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
+
+    def test_sol_high_failure_escalates_to_astra_then_astra_escalates_one_step(self):
         sol_failure = self.advisor.apply_history(
-            {"model": "gpt-5.6-sol", "effort": "high", "rule_id": "high-risk-deep-work"},
-            [{"model": "gpt-5.6-sol", "effort": "high", "outcome": "verified_fail"}],
+            {
+                "model": "gpt-6-sol",
+                "effort": "high",
+                "model_version": "gpt-6",
+                "rule_id": "high-risk-deep-work",
+            },
+            [{"model": "gpt-6-sol", "effort": "high", "outcome": "verified_fail"}],
         )
         astra_failure = self.advisor.apply_history(
             {"model": "gpt-6-astra", "effort": "low", "rule_id": "verified-failure-escalation"},
@@ -624,19 +823,19 @@ class AdvisorRegistryTests(unittest.TestCase):
     def test_escalation_cycle_is_blocked_instead_of_looping(self):
         original_chain = self.advisor.ESCALATION_CHAIN
         self.advisor.ESCALATION_CHAIN = {
-            ("gpt-5.6-sol", "high"): ("gpt-6-astra", "low"),
-            ("gpt-6-astra", "low"): ("gpt-5.6-sol", "high"),
+            ("gpt-6-sol", "high"): ("gpt-6-astra", "low"),
+            ("gpt-6-astra", "low"): ("gpt-6-sol", "high"),
         }
         try:
             result = self.advisor.apply_history(
                 {
-                    "model": "gpt-5.6-sol",
+                    "model": "gpt-6-sol",
                     "effort": "high",
-                    "model_version": "gpt-5.6",
+                    "model_version": "gpt-6",
                     "rule_id": "high-risk-deep-work",
                 },
                 [
-                    {"model": "gpt-5.6-sol", "effort": "high", "outcome": "verified_fail"},
+                    {"model": "gpt-6-sol", "effort": "high", "outcome": "verified_fail"},
                     {"model": "gpt-6-astra", "effort": "low", "outcome": "verified_fail"},
                 ],
             )
@@ -645,15 +844,37 @@ class AdvisorRegistryTests(unittest.TestCase):
 
         self.assertTrue(result["dispatch_blocked"])
 
+    def test_escalation_rejects_a_manual_only_target(self):
+        original_chain = self.advisor.ESCALATION_CHAIN
+        self.advisor.ESCALATION_CHAIN = {
+            ("gpt-6-sol", "high"): ("gpt-6-sol", "max"),
+        }
+        try:
+            result = self.advisor.apply_history(
+                {
+                    "model": "gpt-6-sol",
+                    "effort": "high",
+                    "model_version": "gpt-6",
+                    "rule_id": "high-risk-deep-work",
+                },
+                [{"model": "gpt-6-sol", "effort": "high", "outcome": "verified_fail"}],
+            )
+        finally:
+            self.advisor.ESCALATION_CHAIN = original_chain
+
+        self.assertTrue(result["dispatch_blocked"])
+        self.assertEqual((result["model"], result["effort"]), ("gpt-6-sol", "high"))
+
     def test_exhausted_escalation_chain_blocks_every_dispatch_path(self):
         recommendation = self.advisor.apply_history(
             {
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "effort": "high",
+                "model_version": "gpt-6",
                 "rule_id": "high-risk-deep-work",
             },
             [
-                {"model": "gpt-5.6-sol", "effort": "high", "outcome": "verified_fail"},
+                {"model": "gpt-6-sol", "effort": "high", "outcome": "verified_fail"},
                 {"model": "gpt-6-astra", "effort": "low", "outcome": "verified_fail"},
                 {"model": "gpt-6-astra", "effort": "medium", "outcome": "verified_fail"},
                 {"model": "gpt-6-astra", "effort": "high", "outcome": "verified_fail"},
@@ -701,7 +922,7 @@ class AdvisorRegistryTests(unittest.TestCase):
         self.assertNotIn("raw_prompt", persisted)
         self.assertEqual(persisted["verification_result"], "12 passed")
 
-    def test_record_persists_actual_dispatch_evidence(self):
+    def test_historical_gpt_5_6_external_record_shape_remains_valid(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "outcomes.jsonl"
             saved = self.advisor.append_record(
@@ -1416,7 +1637,7 @@ python3 -m unittest
 
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["model"], "gpt-5.6-luna")
+        self.assertEqual(payload["model"], "gpt-6-luna")
         self.assertEqual(payload["history_basis"], "no stable verified-history override")
 
     def test_record_and_query_commands_round_trip_controlled_data(self):
@@ -1557,8 +1778,8 @@ python3 -m unittest
 
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["model"], "gpt-5.6-terra")
-        self.assertEqual(payload["agent_name"], "pas_terra_builder")
+        self.assertEqual(payload["model"], "gpt-6-sol")
+        self.assertEqual(payload["agent_name"], "pas_sol_analyst")
         self.assertEqual(payload["phase"], "build")
         self.assertTrue(payload["dispatch_required"])
 

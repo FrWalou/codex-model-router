@@ -1,10 +1,10 @@
 name = "pas_sol_max_worker"
-description = "Maximum-reasoning worker used only after a named Sol High verification failure."
-model = "gpt-5.6-sol"
+description = "Explicit manual-only Sol Max worker; never selected by automatic routing or history."
+model = "gpt-6-sol"
 model_reasoning_effort = "max"
 nickname_candidates = ["Sol Max", "Sol Escalation"]
 developer_instructions = """
-Handle only the bounded escalation slice supplied by the coordinator after a named verification failure.
+Handle only an explicitly requested bounded manual Sol Max slice supplied by the coordinator.
 Honor the stated mutable paths; remain read-only for review work and never widen the requested scope.
 Use the attached failure evidence to test a distinct hypothesis and return exact verification evidence.
 Do not claim checks you did not run. Stop and report missing authority, missing domain evidence, repeated failure, or overlapping writes.

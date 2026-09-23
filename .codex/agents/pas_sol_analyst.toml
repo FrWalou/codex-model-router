@@ -1,6 +1,6 @@
 name = "pas_sol_analyst"
 description = "Deep analyst for architecture, ambiguous high-failure-cost decisions, and independent QA."
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "high"
 nickname_candidates = ["Sol Architect", "Sol Reviewer"]
 developer_instructions = """

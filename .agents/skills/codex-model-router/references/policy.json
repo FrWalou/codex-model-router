@@ -1,6 +1,6 @@
 {
-  "policy_version": "2026-09-22.v3",
-  "model_version": "gpt-5.6",
+  "policy_version": "2026-09-23.v4",
+  "model_version": "gpt-6",
   "supported_model_versions": ["gpt-5.6", "gpt-6"],
   "max_record_age_days": 90,
   "rules": [
@@ -10,7 +10,7 @@
         "failcost": ["high"],
         "depth": ["deep"]
       },
-      "model": "gpt-5.6-sol",
+      "model": "gpt-6-sol",
       "effort": "high",
       "escalation": "Clarify unresolved authority or domain decisions before execution; after a focused Sol High run fails a named check, use the bounded Astra escalation chain."
     },
@@ -20,7 +20,7 @@
         "failcost": ["high"],
         "verifiable": ["partial", "no"]
       },
-      "model": "gpt-5.6-sol",
+      "model": "gpt-6-sol",
       "effort": "high",
       "escalation": "Stop on unresolved high-impact assumptions; do not substitute more effort for missing authority or evidence."
     },
@@ -30,9 +30,9 @@
         "verifiable": ["yes"],
         "volume": ["high"]
       },
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-luna",
       "effort": "medium",
-      "escalation": "Retry validator failures with Terra + Medium; use Sol + High only for isolated deep-judgment exceptions."
+      "escalation": "After a named validator failure, move to Sol Medium; use Sol High only after a verified Sol Medium failure."
     },
     {
       "id": "clear-repeatable-work",
@@ -40,7 +40,7 @@
         "verifiable": ["yes"],
         "depth": ["shallow"]
       },
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-luna",
       "effort": "medium",
       "escalation": "Raise effort one step only after a named deterministic check fails."
     },
@@ -50,9 +50,9 @@
         "verifiable": ["partial", "no"],
         "depth": ["medium"]
       },
-      "model": "gpt-5.6-terra",
+      "model": "gpt-6-sol",
       "effort": "high",
-      "escalation": "Move to Sol + High when the failure shows a knowledge or judgment ceiling, not merely verbosity or formatting drift."
+      "escalation": "After a named Sol High failure, use the bounded Astra escalation chain."
     },
     {
       "id": "complex-build",
@@ -60,14 +60,14 @@
         "failcost": ["mid"],
         "depth": ["deep"]
       },
-      "model": "gpt-5.6-terra",
+      "model": "gpt-6-sol",
       "effort": "high",
-      "escalation": "Move to Sol + High if architecture, domain knowledge, or repeated verification failures exceed Terra's ceiling."
+      "escalation": "After a named Sol High failure, use the bounded Astra escalation chain."
     }
   ],
   "fallback": {
     "id": "balanced-default",
-    "model": "gpt-5.6-terra",
+    "model": "gpt-6-sol",
     "effort": "medium",
     "escalation": "Name the failed check, then raise effort or tier one step according to the failure type."
   },

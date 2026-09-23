@@ -1,6 +1,11 @@
 import unittest
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.9/3.10 CI compatibility
+    tomllib = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 AGENT_DIR = REPO_ROOT / ".codex" / "agents"
@@ -8,11 +13,10 @@ SKILL_ROOT = REPO_ROOT / ".agents" / "skills" / "codex-model-router"
 SKILL_PATH = SKILL_ROOT / "SKILL.md"
 README_PATH = SKILL_ROOT / "README.md"
 EXPECTED_AGENTS = {
-    "pas_luna_worker.toml": ("pas_luna_worker", "gpt-5.6-luna", "medium"),
-    "pas_terra_worker.toml": ("pas_terra_worker", "gpt-5.6-terra", "medium"),
-    "pas_terra_builder.toml": ("pas_terra_builder", "gpt-5.6-terra", "high"),
-    "pas_sol_analyst.toml": ("pas_sol_analyst", "gpt-5.6-sol", "high"),
-    "pas_sol_max_worker.toml": ("pas_sol_max_worker", "gpt-5.6-sol", "max"),
+    "pas_luna_worker.toml": ("pas_luna_worker", "gpt-6-luna", "medium"),
+    "pas_sol_worker.toml": ("pas_sol_worker", "gpt-6-sol", "medium"),
+    "pas_sol_analyst.toml": ("pas_sol_analyst", "gpt-6-sol", "high"),
+    "pas_sol_max_worker.toml": ("pas_sol_max_worker", "gpt-6-sol", "max"),
     "pas_astra_low_worker.toml": ("pas_astra_low_worker", "gpt-6-astra", "low"),
     "pas_astra_medium_worker.toml": ("pas_astra_medium_worker", "gpt-6-astra", "medium"),
     "pas_astra_high_worker.toml": ("pas_astra_high_worker", "gpt-6-astra", "high"),
@@ -24,9 +28,28 @@ class ProjectAgentContractTests(unittest.TestCase):
         for filename, (name, model, effort) in EXPECTED_AGENTS.items():
             with self.subTest(filename=filename):
                 text = (AGENT_DIR / filename).read_text(encoding="utf-8")
-                self.assertIn(f'name = "{name}"', text)
-                self.assertIn(f'model = "{model}"', text)
-                self.assertIn(f'model_reasoning_effort = "{effort}"', text)
+                if tomllib is not None:
+                    data = tomllib.loads(text)
+                    self.assertEqual(data["name"], name)
+                    self.assertEqual(data["model"], model)
+                    self.assertEqual(data["model_reasoning_effort"], effort)
+                else:
+                    self.assertIn(f'name = "{name}"', text)
+                    self.assertIn(f'model = "{model}"', text)
+                    self.assertIn(f'model_reasoning_effort = "{effort}"', text)
+
+    def test_project_agent_set_and_count_are_exact(self):
+        self.assertEqual(
+            {path.name for path in AGENT_DIR.glob("pas_*.toml")},
+            set(EXPECTED_AGENTS),
+        )
+        self.assertEqual(len(EXPECTED_AGENTS), 7)
+
+    def test_sol_max_worker_is_explicit_manual_only(self):
+        text = (AGENT_DIR / "pas_sol_max_worker.toml").read_text(encoding="utf-8").lower()
+        self.assertIn("explicit", text)
+        self.assertIn("manual-only", text)
+        self.assertIn("never selected by automatic routing or history", text)
 
     def test_project_agents_require_scope_and_evidence_reporting(self):
         for filename in EXPECTED_AGENTS:

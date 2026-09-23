@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
 
-Codex Model Router is a repository-scoped skill and custom-agent package for using GPT-5.6 Luna, Terra, Sol, and GPT-6 Astra intentionally inside one visible Codex conversation.
+Codex Model Router is a repository-scoped skill and custom-agent package for using GPT-6 Luna, Sol, and Astra intentionally inside one visible Codex conversation.
 
 The main conversation stays in control of requirements, approvals, and final integration. Bounded planning, implementation, test, and QA slices can be delegated automatically to model-specific workers. The router does not silently switch the model of the active conversation.
 
@@ -12,9 +12,8 @@ The main conversation stays in control of requirements, approvals, and final int
 
 Picking one expensive model for an entire coding task is simple but wasteful. Picking a cheaper model for everything is fast until the task needs architectural judgment or high-risk review. This package separates orchestration from execution:
 
-- GPT-5.6 Sol handles deep architecture, ambiguity, and high-failure-cost QA.
-- GPT-5.6 Terra handles everyday implementation, integration, and moderately complex debugging.
-- GPT-5.6 Luna handles repeatable, validator-backed, high-volume, and deterministic test work.
+- GPT-6 Sol Medium handles everyday implementation, integration, and analysis; Sol High handles deep architecture, ambiguity, and high-failure-cost QA.
+- GPT-6 Luna Medium handles repeatable, validator-backed, high-volume, and deterministic test work.
 - GPT-6 Astra is a final, evidence-gated escalation tier for genuinely difficult or high-consequence work after Sol.
 
 The choice is not made from phase names alone. A difficult test investigation may need Sol; a mechanical planning inventory may need Luna. The deterministic advisor considers verifiability, failure cost, volume, depth, decomposability, and verified historical outcomes.
@@ -26,8 +25,8 @@ flowchart LR
     U[User in one conversation] --> C[Main coordinator]
     C --> R[Deterministic router]
     R -->|Luna| L[pas_luna_worker]
-    R -->|Terra| T[pas_terra_builder]
-    R -->|Sol| S[pas_sol_analyst]
+    R -->|Sol Medium| T[pas_sol_worker]
+    R -->|Sol High| S[pas_sol_analyst]
     S -->|Named verification failure| A[pas_astra_low_worker]
     L --> E[Verification evidence]
     T --> E
@@ -52,8 +51,7 @@ your-repository/
 └── .codex/
     └── agents/
         ├── pas_luna_worker.toml
-        ├── pas_terra_worker.toml
-        ├── pas_terra_builder.toml
+        ├── pas_sol_worker.toml
         ├── pas_sol_analyst.toml
         ├── pas_sol_max_worker.toml
         ├── pas_astra_low_worker.toml
@@ -83,8 +81,8 @@ Repository-scoped installation is recommended first. It keeps policy, custom wor
 
 ### Requirements
 
-- A current Codex CLI or Codex application with GPT-5.6 Sol, Terra, Luna, and (for Astra escalation) GPT-6 Astra available to the signed-in account.
-- Tested with Codex CLI `0.144.4`; newer releases should be revalidated when model slugs or custom-agent schema change.
+- A current Codex CLI or Codex application with GPT-6 Luna, Sol, and Astra available to the signed-in account.
+- Tested with Codex CLI `0.156.1`; newer releases should be revalidated when model slugs or custom-agent schema change.
 - Python 3.9 or newer for the advisor.
 - Native custom-agent support for the preferred dispatch path.
 - `codex exec` for the explicit fallback path.
@@ -100,7 +98,7 @@ codex debug models
 Invoke it explicitly:
 
 ```text
-Use $codex-model-router to plan, implement, test, and independently QA this change with suitable GPT-5.6 workers.
+Use $codex-model-router to plan, implement, test, and independently QA this change with suitable GPT-6 workers.
 ```
 
 The skill metadata also allows implicit triggering when a substantial request needs deliberate model selection, automatic phase delegation, evidence-based escalation, or cost/quality balancing.
@@ -152,9 +150,9 @@ For a typical multi-phase request, the coordinator repeats the following loop:
 Example outcome:
 
 ```text
-Main conversation: GPT-5.6 Sol coordinator
+Main conversation: coordinator (its active model does not change)
 Plan:             pas_sol_analyst / Sol high
-Build:            pas_terra_builder / Terra high
+Build:            pas_sol_worker / Sol medium
 Tests:            pas_luna_worker / Luna medium
 Independent QA:   pas_sol_analyst / Sol high
 ```
@@ -201,17 +199,17 @@ Record a verified worker result:
 python3 .agents/skills/codex-model-router/scripts/advisor.py record \
   --task-family feature-build \
   --axes-json '{"verifiable":"yes","failcost":"mid","volume":"mid","depth":"deep","decomposable":"no","workstreams":1}' \
-  --model gpt-5.6-terra \
-  --effort high \
+  --model gpt-6-sol \
+  --effort medium \
   --phase build \
-  --agent-name pas_terra_builder \
+  --agent-name pas_sol_worker \
   --dispatch-mode native_custom_agent \
   --outcome verified_pass \
   --verification-command 'pytest -q' \
   --verification-result '28 passed'
 ```
 
-History overrides static policy only for a registered exact model-effort agent when the same task family, axes, phase, and model generation have at least two recent verified passes and no verified failure. Astra xhigh/max, Max, Ultra, and legacy unregistered combinations are never eligible for automatic override. A verified failure moves the next dispatch away from the failed combination through a bounded escalation chain. Records older than the configured TTL are ignored.
+History overrides static policy only for a registered exact automatic model-effort agent when the same task family, axes, phase, and model generation have at least two recent verified passes and no verified failure. Historical GPT-5.6 records remain readable but cannot override or escalate GPT-6 recommendations. The local Codex catalog supports Luna low/medium/high/xhigh/max and Sol/Astra low/medium/high/xhigh/max/ultra. Catalog support permits recording and validation; xhigh, max, and ultra remain manual-only and cannot become automatic through history. A verified failure moves the next dispatch one step through the bounded escalation chain. Records older than the configured TTL are ignored.
 
 ## Escalation
 
@@ -222,7 +220,7 @@ Escalate from observed failure, not intuition:
 - Stop if the same failure repeats without new evidence.
 - Do not substitute higher reasoning effort for missing permissions, authority, requirements, or domain sources.
 
-The static policy remains Luna/Terra/Sol. A named Sol High verification failure moves through Astra Low, Astra Medium, then Astra High; a further Astra High failure blocks dispatch. Astra xhigh/max and Ultra are never selected automatically and remain explicit/manual-only options.
+The static policy selects GPT-6 Luna Medium or GPT-6 Sol Medium/High. Verified failure escalates Luna Medium → Sol Medium → Sol High → Astra Low → Astra Medium → Astra High → blocked. Astra is not a static default. xhigh, max, and ultra are never selected automatically.
 
 ## Safety boundaries
 
@@ -293,8 +291,7 @@ Validate agent TOML against the current model catalog with Python 3.12 `tomllib`
 
 .codex/agents/
 ├── pas_luna_worker.toml
-├── pas_terra_worker.toml
-├── pas_terra_builder.toml
+├── pas_sol_worker.toml
 ├── pas_sol_analyst.toml
 ├── pas_sol_max_worker.toml
 ├── pas_astra_low_worker.toml
